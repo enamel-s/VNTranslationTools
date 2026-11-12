@@ -800,13 +800,162 @@ def _http_json(method, url, api_key, body=None, timeout=180):
         raise GeminiError(0, f"network error: {e}")
 
 
-def load_keys(args):
+# -- console output that cooperates with the progress bar ---------------------
+
+_console_lock = threading.RLock()
+_active_progress = None
+
+
+def log(message):
+    """print() that doesn't tear the progress bar apart."""
+    with _console_lock:
+        if _active_progress is not None:
+            _active_progress.clear()
+        print(message, flush=True)
+        if _active_progress is not None:
+            _active_progress.draw()
+
+
+class Progress:
+    """A dependency-free progress bar; prints plain lines when not on a terminal."""
+
+    def __init__(self, total, unit="lines"):
+        self.total = max(total, 1)
+        self.unit = unit
+        self.done = 0
+        self.label = ""
+        self.started = time.time()
+        self.tty = sys.stdout.isatty()
+        self.width = 0
+
+    def __enter__(self):
+        global _active_progress
+        with _console_lock:
+            _active_progress = self
+            self.draw()
+        return self
+
+    def __exit__(self, *exc):
+        global _active_progress
+        with _console_lock:
+            if self.tty:
+                self.draw()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            _active_progress = None
+
+    def _text(self):
+        elapsed = max(time.time() - self.started, 1e-6)
+        rate = self.done / elapsed
+        remaining = (self.total - self.done) / rate if rate > 0 else 0
+        eta = f"{int(remaining) // 3600:d}:{int(remaining) % 3600 // 60:02d}:{int(remaining) % 60:02d}" \
+            if self.done else "--:--:--"
+        filled = 30 * self.done // self.total
+        return (f"[{'#' * filled}{'-' * (30 - filled)}] {100 * self.done // self.total:3d}% "
+                f"{self.done}/{self.total} {self.unit} | {rate:.1f}/s | ETA {eta} | {self.label}")
+
+    def clear(self):
+        if self.tty and self.width:
+            sys.stdout.write("\r" + " " * self.width + "\r")
+
+    def draw(self):
+        if not self.tty:
+            return
+        columns = shutil.get_terminal_size((100, 20)).columns - 1
+        text = self._text()[:columns]
+        sys.stdout.write("\r" + text + " " * max(self.width - len(text), 0))
+        sys.stdout.flush()
+        self.width = len(text)
+
+    def update(self, count, label=""):
+        with _console_lock:
+            self.done += count
+            self.label = label
+            if self.tty:
+                self.draw()
+            else:
+                print(self._text(), flush=True)
+
+
+# -- dedicated Gemini config file ----------------------------------------------
+
+CONFIG_NAME = "gemini_config.json"
+CONFIG_DEFAULTS = {
+    # tried in this order: the first is the main model, the rest are fallbacks
+    "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"],
+    "keys_file": "",            # text file, one API key per line (relative to this config file)
+    "keys": [],                 # ...or keys listed right here
+    "batch_size": 40,           # lines per request
+    "batch_chars": 6000,        # max source characters per request
+    "workers": 0,               # sheets translated in parallel (0 = number of keys, max 8)
+    "temperature": 0.3,
+    "thinking_budget": None,    # thinkingBudget for models that support it (null = model default)
+    "cache": True,              # explicit context caching
+    "cache_ttl": 3600,          # seconds
+    "max_attempts": 12,         # requests tried for one batch before giving up
+    "fallback_after_errors": 3, # consecutive server/format errors before a model is rested
+    "model_rest_seconds": 60,   # how long a failing model is rested (fallbacks take over meanwhile)
+    "request_timeout": 180,
+    "sample_chars": 120000,     # how much script Gemini reads to build the translation context
+    "error_log": "",            # default: <workbook>.gemini_errors.log
+    "api_base": "https://generativelanguage.googleapis.com/v1beta",
+}
+
+
+def find_config(explicit=None, xlsx=None):
+    if explicit:
+        return explicit
+    candidates = []
+    if xlsx:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(xlsx)), CONFIG_NAME))
+    candidates.append(os.path.abspath(CONFIG_NAME))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def load_config(path):
+    config = copy.deepcopy(CONFIG_DEFAULTS)
+    if path:
+        with open(path, encoding="utf-8") as f:
+            try:
+                loaded = json.load(f)
+            except ValueError as e:
+                raise ValueError(f"{path} is not valid JSON: {e}")
+        unknown = sorted(set(loaded) - set(CONFIG_DEFAULTS))
+        if unknown:
+            print(f"WARNING: unknown setting(s) in {path}: {', '.join(unknown)}", file=sys.stderr)
+        config.update({k: v for k, v in loaded.items() if k in CONFIG_DEFAULTS})
+    if isinstance(config["models"], str):
+        config["models"] = [m for m in re.split(r"[,\s]+", config["models"]) if m]
+    if not config["models"]:
+        raise ValueError("the config needs at least one entry in \"models\"")
+    return config
+
+
+def save_config(path, config):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({k: config.get(k, v) for k, v in CONFIG_DEFAULTS.items()}, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def load_keys(args, config=None, config_path=None):
+    """Command line > config file > GEMINI_API_KEYS / GEMINI_API_KEY."""
+    def read_file(path):
+        with open(path, encoding="utf-8") as f:
+            return [line.split("#")[0].strip() for line in f]
+
     keys = []
     if getattr(args, "keys", None):
         keys += re.split(r"[,\s]+", args.keys)
     if getattr(args, "keys_file", None):
-        with open(args.keys_file, encoding="utf-8") as f:
-            keys += [line.split("#")[0].strip() for line in f]
+        keys += read_file(args.keys_file)
+    if not keys and config:
+        keys += [str(k) for k in config.get("keys") or []]
+        if config.get("keys_file"):
+            base = os.path.dirname(os.path.abspath(config_path)) if config_path else "."
+            keys += read_file(os.path.join(base, os.path.expanduser(config["keys_file"])))
     if not keys:
         keys += re.split(r"[,\s]+", os.environ.get("GEMINI_API_KEYS", ""))
         keys += [os.environ.get("GEMINI_API_KEY", "")]
@@ -819,13 +968,16 @@ def load_keys(args):
 
 
 class KeyPool:
-    """Hands out API keys round-robin; keys that hit a rate limit rest for a while."""
+    """
+    Hands out API keys round-robin. Quotas are counted per key *and* per model,
+    so a key resting on one model can still be used with a fallback model.
+    """
 
     def __init__(self, keys):
         if not keys:
             raise ValueError("no Gemini API keys given")
         self.keys = list(keys)
-        self.ready_at = {k: 0.0 for k in keys}
+        self.ready_at = {}       # (key, model) -> time it may be used again
         self.dead = {}
         self.lock = threading.Lock()
         self.cursor = 0
@@ -833,32 +985,39 @@ class KeyPool:
     def label(self, key):
         return f"key#{self.keys.index(key) + 1}(...{key[-4:]})"
 
-    def acquire(self):
-        while True:
-            with self.lock:
-                alive = [k for k in self.keys if k not in self.dead]
-                if not alive:
-                    raise RuntimeError("every API key was rejected: " + "; ".join(
-                        f"{self.label(k)}: {why}" for k, why in self.dead.items()))
-                now = time.time()
-                for step in range(len(self.keys)):
-                    key = self.keys[(self.cursor + step) % len(self.keys)]
-                    if key not in self.dead and self.ready_at[key] <= now:
-                        self.cursor = (self.cursor + step + 1) % len(self.keys)
-                        return key
-                wait = min(self.ready_at[k] for k in alive) - now
-            print(f"  all keys are rate limited, waiting {wait:.0f}s ...", flush=True)
-            time.sleep(min(max(wait, 0.5), 300))
-
-    def cooldown(self, key, seconds):
+    def try_acquire(self, model):
+        """A key that may be used with `model` right now, or None."""
         with self.lock:
-            self.ready_at[key] = max(self.ready_at[key], time.time() + seconds)
+            if len(self.dead) == len(self.keys):
+                raise RuntimeError("every API key was rejected: " + "; ".join(
+                    f"{self.label(k)}: {why}" for k, why in self.dead.items()))
+            now = time.time()
+            for step in range(len(self.keys)):
+                key = self.keys[(self.cursor + step) % len(self.keys)]
+                if key not in self.dead and self.ready_at.get((key, model), 0) <= now:
+                    self.cursor = (self.cursor + step + 1) % len(self.keys)
+                    return key
+        return None
+
+    def wait_time(self, models):
+        with self.lock:
+            times = [self.ready_at.get((k, m), 0) for k in self.keys if k not in self.dead for m in models]
+        return max(min(times) - time.time(), 0) if times else 0
+
+    def cooldown(self, key, model, seconds):
+        with self.lock:
+            self.ready_at[(key, model)] = max(self.ready_at.get((key, model), 0), time.time() + seconds)
+
+    def cooldown_model(self, model, seconds):
+        for key in self.keys:
+            self.cooldown(key, model, seconds)
 
     def kill(self, key, why):
         with self.lock:
-            if key not in self.dead:
-                self.dead[key] = why
-                print(f"  {self.label(key)} disabled: {why}", flush=True)
+            if key in self.dead:
+                return
+            self.dead[key] = why
+        log(f"  {self.label(key)} disabled: {why}")
 
 
 def _retry_delay(err):
@@ -881,17 +1040,23 @@ class GeminiClient:
     """
     generateContent with:
       * rotation over many API keys (KeyPool)
+      * fallback models: `models` is tried in order. When every key is resting on
+        a model, when the model keeps answering with server errors / broken JSON,
+        or when it doesn't exist, the next model in the list takes over. The
+        preferred model is used again as soon as it is available.
       * explicit context caching: the fixed part of every prompt (rules, glossary,
-        character sheet, story notes) is uploaded once per key as a cachedContent
-        and referenced afterwards. If a key/model can't cache (content too small,
-        free tier, ...) the same prefix is sent inline, which still benefits from
-        Gemini's implicit caching because the prefix is byte-identical each time.
+        character sheet, story notes) is uploaded once per key and model as a
+        cachedContent and referenced afterwards. If a key/model can't cache
+        (content too small, free tier, ...) the same prefix is sent inline, which
+        still benefits from Gemini's implicit caching.
+      * every error Gemini returns is shown and appended to an error log.
     """
 
-    def __init__(self, pool, model, api_base, system_text, reference_text, state_path,
-                 use_cache=True, ttl=3600, temperature=0.3, thinking_budget=None, max_attempts=12):
+    def __init__(self, pool, models, api_base, system_text, reference_text, state_path,
+                 use_cache=True, ttl=3600, temperature=0.3, thinking_budget=None, max_attempts=12,
+                 fallback_after=3, model_rest=60, timeout=180, error_log=None):
         self.pool = pool
-        self.model = model
+        self.models = list(models)
         self.api_base = api_base.rstrip("/")
         self.system_text = system_text
         self.reference_text = reference_text
@@ -901,11 +1066,19 @@ class GeminiClient:
         self.temperature = temperature
         self.thinking_budget = thinking_budget
         self.max_attempts = max_attempts
+        self.fallback_after = max(fallback_after, 1)
+        self.model_rest = model_rest
+        self.timeout = timeout
+        self.error_log = error_log
         self.lock = threading.Lock()
-        self.no_cache_keys = set()
-        self.usage = {"requests": 0, "prompt": 0, "cached": 0, "output": 0}
+        self.no_cache = set()           # (key, model) pairs that can't create caches
+        self.dead_models = {}           # model -> why it was dropped
+        self.model_errors = {m: 0 for m in self.models}
+        self.last_model = None
+        self.error_count = 0
+        self.usage = {"requests": 0, "prompt": 0, "cached": 0, "output": 0, "models": {}}
         self.digest = hashlib.sha256(
-            "\0".join((model, system_text, reference_text or "")).encode("utf-8")).hexdigest()[:16]
+            "\0".join((system_text, reference_text or "")).encode("utf-8")).hexdigest()[:16]
         self.state = {}
         if state_path and os.path.exists(state_path):
             try:
@@ -913,6 +1086,27 @@ class GeminiClient:
                     self.state = json.load(f)
             except ValueError:
                 self.state = {}
+
+    # -- error reporting ----------------------------------------------------
+    def report(self, what, key, model, err=None, detail=""):
+        """Shows a Gemini error on screen and appends the full answer to the error log."""
+        who = f"{model}, {self.pool.label(key)}" if key else model
+        if err is not None:
+            status = err.payload.get("status") or ("NETWORK" if err.status == 0 else "")
+            summary = f"HTTP {err.status} {status}: {' '.join(str(err.message).split())}"
+        else:
+            summary = " ".join(str(detail).split())
+        log(f"  ! Gemini error [{who}] {summary[:300]}\n    -> {what}")
+        with self.lock:
+            self.error_count += 1
+            if self.error_log:
+                try:
+                    with open(self.error_log, "a", encoding="utf-8") as f:
+                        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{who}] {summary}\n    action: {what}\n")
+                        if err is not None and err.payload:
+                            f.write("    response: " + json.dumps(err.payload, ensure_ascii=False) + "\n")
+                except OSError:
+                    pass
 
     # -- fixed prompt prefix ------------------------------------------------
     def _system(self):
@@ -928,72 +1122,117 @@ class GeminiClient:
 
     # -- cache handling -----------------------------------------------------
     @staticmethod
-    def _key_id(key):
-        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]   # never store the key itself
+    def _state_id(key, model):
+        # never store the key itself
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16] + ":" + model
 
     def _save_state(self):
         if self.state_path:
             with open(self.state_path, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=1)
 
-    def _cache_for(self, key):
+    def _cache_for(self, key, model):
         if not self.use_cache or not self.reference_text:
             return None
-        kid = self._key_id(key)
+        sid = self._state_id(key, model)
         with self.lock:
-            if key in self.no_cache_keys:
+            if (key, model) in self.no_cache:
                 return None
-            entry = self.state.get(kid)
+            entry = self.state.get(sid)
             if entry and entry.get("digest") == self.digest and entry.get("expires", 0) > time.time() + 120:
                 return entry["name"]
-            # Caches belong to the key's project, so each key gets its own copy.
-            body = {
-                "model": f"models/{self.model}",
-                "displayName": f"vntextpatch-{self.digest}",
-                "systemInstruction": self._system(),
-                "contents": self._prefix_turns(),
-                "ttl": f"{int(self.ttl)}s",
-            }
-            try:
-                created = _http_json("POST", f"{self.api_base}/cachedContents", key, body)
-            except GeminiError as e:
-                if e.status in (0, 429, 500, 502, 503, 504):
-                    return None        # temporary: send the context inline this time
-                self.no_cache_keys.add(key)
-                print(f"  {self.pool.label(key)}: context cache unavailable ({e.message[:120]}); "
-                      "sending context inline (implicit caching still applies)", flush=True)
-                return None
-            tokens = (created.get("usageMetadata") or {}).get("totalTokenCount", "?")
-            print(f"  {self.pool.label(key)}: created context cache {created.get('name')} ({tokens} tokens)",
-                  flush=True)
-            self.state[kid] = {"name": created["name"], "digest": self.digest, "model": self.model,
+        # Caches belong to the key's project and to one model, so each pair gets its own copy.
+        body = {
+            "model": f"models/{model}",
+            "displayName": f"vntextpatch-{self.digest}",
+            "systemInstruction": self._system(),
+            "contents": self._prefix_turns(),
+            "ttl": f"{int(self.ttl)}s",
+        }
+        try:
+            created = _http_json("POST", f"{self.api_base}/cachedContents", key, body, self.timeout)
+        except GeminiError as e:
+            if e.status in (0, 429, 500, 502, 503, 504):
+                return None        # temporary: send the context inline this time
+            with self.lock:
+                self.no_cache.add((key, model))
+            self.report("context cache not available for this key/model; sending the context inline instead "
+                        "(implicit caching still applies)", key, model, e)
+            return None
+        tokens = (created.get("usageMetadata") or {}).get("totalTokenCount", "?")
+        log(f"  {self.pool.label(key)}: created context cache for {model}: {created.get('name')} ({tokens} tokens)")
+        with self.lock:
+            self.state[sid] = {"name": created["name"], "digest": self.digest, "model": model,
                                "expires": time.time() + self.ttl}
             self._save_state()
-            return created["name"]
+        return created["name"]
 
-    def _drop_cache(self, key):
+    def _drop_cache(self, key, model):
         with self.lock:
-            self.state.pop(self._key_id(key), None)
+            self.state.pop(self._state_id(key, model), None)
             self._save_state()
 
     def delete_caches(self):
         """Deletes the caches created for the given keys (stops storage billing)."""
         for key in self.pool.keys:
-            entry = self.state.pop(self._key_id(key), None)
-            if entry:
-                try:
-                    _http_json("DELETE", f"{self.api_base}/{entry['name']}", key)
-                    print(f"  deleted {entry['name']}")
-                except GeminiError as e:
-                    print(f"  could not delete {entry['name']}: {e.message[:100]}")
+            for model in self.models:
+                entry = self.state.pop(self._state_id(key, model), None)
+                if entry:
+                    try:
+                        _http_json("DELETE", f"{self.api_base}/{entry['name']}", key)
+                        log(f"  deleted {entry['name']}")
+                    except GeminiError as e:
+                        log(f"  could not delete {entry['name']}: {e.message[:100]}")
         self._save_state()
+
+    # -- model / key selection ----------------------------------------------
+    def _pick(self):
+        """Returns (model, key): the most preferred model that has a key free right now."""
+        live = [m for m in self.models if m not in self.dead_models]
+        if not live:
+            raise RuntimeError("no usable model left: " + "; ".join(
+                f"{m}: {why}" for m, why in self.dead_models.items()))
+        for model in live:
+            key = self.pool.try_acquire(model)
+            if key:
+                with self.lock:
+                    changed, self.last_model = model != self.last_model, model
+                if changed:
+                    role = "main model" if model == self.models[0] else "FALLBACK model"
+                    log(f"  now using {role} {model}")
+                return model, key
+        wait = self.pool.wait_time(live)
+        log(f"  every key is resting on every model, waiting {wait:.0f}s ...")
+        time.sleep(min(max(wait, 0.5), 300))
+        return None, None
+
+    def _model_failed(self, model, key, what, err=None, detail=""):
+        """Counts a server/format error; rests the model after too many in a row."""
+        with self.lock:
+            self.model_errors[model] += 1
+            count = self.model_errors[model]
+            rest = count >= self.fallback_after
+            if rest:
+                self.model_errors[model] = 0
+        if rest:
+            others = [m for m in self.models if m != model and m not in self.dead_models]
+            self.pool.cooldown_model(model, self.model_rest)
+            what = (f"{count} errors in a row: resting {model} for {self.model_rest}s"
+                    + (f", falling back to {others[0]}" if others else ""))
+        else:
+            self.pool.cooldown(key, model, min(3 * 2 ** count, 60))
+        self.report(what, key, model, err, detail)
 
     # -- generation ---------------------------------------------------------
     def generate_json(self, user_text, schema, use_context=True):
         last_error = None
-        for attempt in range(self.max_attempts):
-            key = self.pool.acquire()
-            cache = self._cache_for(key) if use_context else None
+        attempts = 0
+        while attempts < self.max_attempts:
+            model, key = self._pick()
+            if model is None:
+                continue
+            attempts += 1
+            cache = self._cache_for(key, model) if use_context else None
             config = {"temperature": self.temperature, "responseMimeType": "application/json",
                       "responseSchema": schema}
             if self.thinking_budget is not None:
@@ -1013,21 +1252,31 @@ class GeminiClient:
                 body["contents"] = (self._prefix_turns() if use_context else []) + [user_turn]
 
             try:
-                resp = _http_json("POST", f"{self.api_base}/models/{self.model}:generateContent", key, body)
+                resp = _http_json("POST", f"{self.api_base}/models/{model}:generateContent", key, body,
+                                  self.timeout)
             except GeminiError as e:
                 last_error = e
                 text = (e.message or "").lower()
                 if e.status == 429:
                     delay = _retry_delay(e)
-                    print(f"  {self.pool.label(key)} hit its quota, resting {delay:.0f}s; switching key", flush=True)
-                    self.pool.cooldown(key, delay)
+                    self.pool.cooldown(key, model, delay)
+                    self.report(f"quota reached: resting this key on {model} for {delay:.0f}s, "
+                                "switching to the next key/model", key, model, e)
                 elif e.status in (0, 500, 502, 503, 504):
-                    self.pool.cooldown(key, min(3 * 2 ** attempt, 60))
+                    self._model_failed(model, key, "retrying with another key", e)
                 elif cache and e.status in (400, 403, 404) and "cache" in text:
-                    self._drop_cache(key)      # expired or deleted: recreate on the next try
+                    self._drop_cache(key, model)      # expired or deleted: recreate on the next try
+                    self.report("context cache is gone, creating a new one", key, model, e)
+                elif e.status == 404 or ("model" in text and ("not found" in text or "not supported" in text)):
+                    self.dead_models[model] = e.message[:120]
+                    others = [m for m in self.models if m not in self.dead_models]
+                    self.report(f"model {model} is not usable, dropping it"
+                                + (f" and falling back to {others[0]}" if others else ""), key, model, e)
                 elif e.status in (401, 403) or "api key" in text or "api_key" in text:
+                    self.report("this key is rejected, dropping it", key, model, e)
                     self.pool.kill(key, e.message[:100])
                 else:
+                    self.report("request refused, giving up on this batch", key, model, e)
                     raise
                 continue
 
@@ -1037,19 +1286,26 @@ class GeminiClient:
                 self.usage["prompt"] += usage.get("promptTokenCount", 0)
                 self.usage["cached"] += usage.get("cachedContentTokenCount", 0)
                 self.usage["output"] += usage.get("candidatesTokenCount", 0)
+                self.usage["models"][model] = self.usage["models"].get(model, 0) + 1
 
             block = (resp.get("promptFeedback") or {}).get("blockReason")
             candidates = resp.get("candidates") or []
             finish = candidates[0].get("finishReason") if candidates else None
             if block or finish in ("SAFETY", "PROHIBITED_CONTENT", "RECITATION", "BLOCKLIST", "MAX_TOKENS"):
+                reason = f"blockReason={block}" if block else f"finishReason={finish}"
+                self.report("splitting the batch and retrying the halves", key, model, detail=f"no answer: {reason}")
                 raise ContentBlocked(block or finish)
             parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
             try:
-                return json.loads(text)
+                result = json.loads(text)
             except ValueError:
                 last_error = GeminiError(200, "model returned invalid JSON")
+                self._model_failed(model, key, "retrying", detail=f"invalid JSON (finishReason={finish}): {text[:200]!r}")
                 continue
+            with self.lock:
+                self.model_errors[model] = 0
+            return result
         raise RuntimeError(f"Gemini request failed after {self.max_attempts} attempts: {last_error}")
 
 
@@ -1291,22 +1547,42 @@ def default_side_path(xlsx_path, suffix):
 
 
 def cmd_translate(args):
-    keys = load_keys(args)
+    config_path = find_config(args.config, args.xlsx)
+    config = load_config(config_path)
+    # command line options win over the config file
+    if args.model:
+        config["models"] = [m for m in re.split(r"[,\s]+", args.model) if m]
+    for name in ("batch_size", "batch_chars", "workers", "temperature", "thinking_budget", "cache_ttl",
+                 "sample_chars", "api_base"):
+        if getattr(args, name) is not None:
+            config[name] = getattr(args, name)
+    if args.no_cache:
+        config["cache"] = False
+    if config["batch_size"] < 1 or config["batch_chars"] < 1:
+        sys.exit("batch_size and batch_chars must be at least 1")
+
+    keys = load_keys(args, config, config_path)
     if not keys:
-        sys.exit("No Gemini API keys. Use --keys-file FILE (one key per line), --keys k1,k2 or set GEMINI_API_KEYS.")
-    if args.batch_size < 1 or args.batch_chars < 1:
-        sys.exit("--batch-size and --batch-chars must be at least 1")
+        sys.exit("No Gemini API keys. Put them in the config file (\"keys\" or \"keys_file\"), "
+                 "use --keys-file FILE / --keys k1,k2, or set GEMINI_API_KEYS.")
     pool = KeyPool(keys)
     wb = openpyxl.load_workbook(args.xlsx)
     styles = _column_styles(wb.worksheets[0])
     names = CharacterNames(args.names or default_names_path(args.xlsx))
     context_path = args.context or default_side_path(args.xlsx, ".context.json")
     state_path = default_side_path(args.xlsx, ".gemini_cache.json")
+    error_log = config["error_log"] or default_side_path(args.xlsx, ".gemini_errors.log")
     system_text = build_system_prompt(args.language, args.source_language)
-    common = dict(model=args.model, api_base=args.api_base, system_text=system_text, state_path=state_path,
-                  use_cache=not args.no_cache, ttl=args.cache_ttl, temperature=args.temperature,
-                  thinking_budget=args.thinking_budget)
-    print(f"Using {len(keys)} API key(s), model {args.model}")
+    common = dict(models=config["models"], api_base=config["api_base"], system_text=system_text,
+                  state_path=state_path, use_cache=bool(config["cache"]), ttl=config["cache_ttl"],
+                  temperature=config["temperature"], thinking_budget=config["thinking_budget"],
+                  max_attempts=config["max_attempts"], fallback_after=config["fallback_after_errors"],
+                  model_rest=config["model_rest_seconds"], timeout=config["request_timeout"],
+                  error_log=error_log)
+    print(f"Config: {config_path or '(built-in defaults, no ' + CONFIG_NAME + ' found)'}")
+    print(f"Using {len(keys)} API key(s). Model: {config['models'][0]}"
+          + (f"  fallbacks: {', '.join(config['models'][1:])}" if len(config["models"]) > 1 else ""))
+    print(f"Gemini errors are also written to {error_log}")
 
     # 1. the translation bible: names + important details, kept in a JSON file you can edit
     if os.path.exists(context_path) and not args.rebuild_context:
@@ -1316,7 +1592,7 @@ def cmd_translate(args):
     else:
         print("Building translation context (character names, personalities, story notes) ...")
         context = build_context(GeminiClient(pool, reference_text=None, **common), wb, args.language,
-                                args.sample_chars)
+                                config["sample_chars"])
         with open(context_path, "w", encoding="utf-8") as f:
             json.dump(context, f, ensure_ascii=False, indent=2)
         print(f"Saved translation context to {context_path} - edit it to fix names or add notes "
@@ -1369,47 +1645,58 @@ def cmd_translate(args):
         print("Nothing to translate: every line already has a TL entry (use --retranslate to redo).")
         return 0
     print(f"Translating {total} lines in {len(jobs)} sheets into {args.language} "
-          f"(up to {args.batch_size} lines / {args.batch_chars} characters per request) ...")
+          f"(up to {config['batch_size']} lines / {config['batch_chars']} characters per request) ...")
 
     book_lock = threading.Lock()
-    progress = {"done": 0, "since_save": 0}
+    counts = {"done": 0, "translated": 0, "flagged": 0, "unsaved": 0}
+    save_every = max(args.save_every, 1)
 
     def work(ws, lines, pending):
         for finished in translate_lines(client, pending, args.language, lines, glossary,
-                                        args.batch_size, args.batch_chars):
+                                        config["batch_size"], config["batch_chars"]):
             with book_lock:
                 for line in finished:
                     if line.translation:
                         _set_cell(ws, line.row, COL_TL, line.translation, styles)
+                        counts["translated"] += 1
                     if line.note:
                         _set_cell(ws, line.row, COL_NOTES, f"{line.kind} {line.note}", styles)
+                        counts["flagged"] += 1
                     elif line.translation:
                         _set_cell(ws, line.row, COL_NOTES, line.kind, styles)
-                progress["done"] += len(finished)
-                progress["since_save"] += len(finished)
-                print(f"  [{progress['done']}/{total}] {ws.title}", flush=True)
-                if progress["since_save"] >= args.save_every:
+                counts["done"] += len(finished)
+                counts["unsaved"] += 1
+                if counts["unsaved"] >= save_every:      # by default: after every batch
                     save_workbook(wb, args.xlsx)
-                    progress["since_save"] = 0
+                    counts["unsaved"] = 0
+            bar.update(len(finished), ws.title)
         return ws.title
 
     failed = []
-    workers = max(1, min(args.workers or len(keys), len(jobs), 8))
-    try:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(work, *job): job[0].title for job in jobs}
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:   # keep the other sheets going, report at the end
-                    failed.append(f"{futures[future]}: {e}")
-    finally:
-        with book_lock:
-            save_workbook(wb, args.xlsx)
+    workers = max(1, min(config["workers"] or len(keys), len(jobs), 8))
+    with Progress(total) as bar:
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(work, *job): job[0].title for job in jobs}
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:   # keep the other sheets going, report at the end
+                        failed.append(f"{futures[future]}: {e}")
+                        log(f"  ! sheet {futures[future]} stopped: {e}")
+        finally:
+            with book_lock:
+                save_workbook(wb, args.xlsx)
 
     u = client.usage
-    print(f"\nDone: {progress['done']}/{total} lines. Gemini usage: {u['requests']} requests, "
-          f"{u['prompt']} prompt tokens ({u['cached']} served from cache), {u['output']} output tokens.")
+    print(f"\nDone: {counts['translated']}/{total} lines translated"
+          + (f", {counts['flagged']} flagged in the Notes column" if counts["flagged"] else "") + ".")
+    print(f"Gemini usage: {u['requests']} requests, {u['prompt']} prompt tokens "
+          f"({u['cached']} served from cache), {u['output']} output tokens.")
+    if u["models"]:
+        print("Requests per model: " + ", ".join(f"{m}: {n}" for m, n in u["models"].items()))
+    if client.error_count:
+        print(f"{client.error_count} Gemini error(s) occurred - details in {error_log}")
     if args.delete_cache:
         client.delete_caches()
     if failed:
@@ -1417,6 +1704,19 @@ def cmd_translate(args):
         for f in failed:
             print("  " + f, file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_config(args):
+    path = args.path or CONFIG_NAME
+    if os.path.exists(path) and not args.force:
+        config = load_config(path)
+        print(f"{path} already exists (use --force to reset it to the defaults):")
+    else:
+        config = copy.deepcopy(CONFIG_DEFAULTS)
+        save_config(path, config)
+        print(f"Wrote {path}:")
+    print(json.dumps(config, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1436,29 +1736,42 @@ def add_parser_options(p):
 
 
 def add_gemini_options(p):
+    p.add_argument("--config", metavar="JSON",
+                   help=f"Gemini config file with models/fallbacks, keys, batch size ... (default: {CONFIG_NAME} "
+                        "next to the workbook or in the current folder). Options below override it.")
     p.add_argument("--keys-file", help="text file with one Gemini API key per line")
     p.add_argument("--keys", help="comma separated API keys (or set GEMINI_API_KEYS)")
-    p.add_argument("--model", default="gemini-2.5-flash")
+    p.add_argument("--model", help="model, or comma separated list: main model first, then fallbacks")
     p.add_argument("--language", default="Burmese", help="target language (default: Burmese)")
     p.add_argument("--source-language", default="English")
     p.add_argument("--context", metavar="JSON", help="translation context file (default: <xlsx>.context.json)")
     p.add_argument("--rebuild-context", action="store_true", help="regenerate the context file")
     p.add_argument("--context-only", action="store_true", help="only build the context / names, don't translate")
-    p.add_argument("--sample-chars", type=int, default=120000, help="how much script to show Gemini for the context")
+    p.add_argument("--sample-chars", type=int, help="how much script to show Gemini for the context")
     p.add_argument("--no-cache", action="store_true", help="don't create explicit context caches")
-    p.add_argument("--cache-ttl", type=int, default=3600, help="cache lifetime in seconds (default 3600)")
+    p.add_argument("--cache-ttl", type=int, help="cache lifetime in seconds")
     p.add_argument("--delete-cache", action="store_true", help="delete the context caches when finished")
-    p.add_argument("--batch-size", type=int, default=40, help="lines per request")
-    p.add_argument("--batch-chars", type=int, default=6000, help="max source characters per request")
-    p.add_argument("--workers", type=int, default=0, help="parallel sheets (default: number of keys, max 8)")
+    p.add_argument("--batch-size", type=int, help="lines per request")
+    p.add_argument("--batch-chars", type=int, help="max source characters per request")
+    p.add_argument("--workers", type=int, help="parallel sheets (default: number of keys, max 8)")
     p.add_argument("--sheets", help="comma separated sheet names to translate (default: all)")
     p.add_argument("--limit", type=int, default=0, help="translate at most N lines per sheet (for a test run)")
     p.add_argument("--retranslate", action="store_true", help="overwrite existing TL cells")
-    p.add_argument("--temperature", type=float, default=0.3)
-    p.add_argument("--thinking-budget", type=int, default=None, help="thinkingBudget for models that support it")
-    p.add_argument("--save-every", type=int, default=200, help="save the workbook every N lines")
-    p.add_argument("--api-base", default="https://generativelanguage.googleapis.com/v1beta")
+    p.add_argument("--temperature", type=float)
+    p.add_argument("--thinking-budget", type=int, help="thinkingBudget for models that support it")
+    p.add_argument("--save-every", type=int, default=1,
+                   help="save the workbook every N batches (default 1: after every batch)")
+    p.add_argument("--api-base")
     p.add_argument("--names", metavar="XML", help="names.xml path (default: next to the workbook)")
+
+
+def _any_keys(xlsx=None, config_path=None):
+    """True when keys are available from the config file or the environment."""
+    try:
+        path = find_config(config_path, xlsx)
+        return bool(load_keys(argparse.Namespace(), load_config(path), path))
+    except (OSError, ValueError):
+        return False
 
 
 def ask_what_next(args):
@@ -1476,7 +1789,7 @@ def ask_what_next(args):
         argv += ["--language", input("Target language: ").strip() or "Burmese"]
     if choice == "3":
         argv += ["--context-only"]
-    if not load_keys(argparse.Namespace()):
+    if not _any_keys(args.xlsx):
         answer = input("Path to a file with your Gemini API keys (one per line), or paste keys separated by commas: ").strip()
         argv += ["--keys-file", answer] if os.path.exists(answer) else ["--keys", answer]
     if args.names:
@@ -1489,10 +1802,8 @@ def ask_what_next(args):
 # ----------------------------------------------------------------------------
 
 SETTINGS_FILE = ".vntextpatch.json"
-DEFAULT_SETTINGS = {"input": "", "xlsx": "script.xlsx", "output": "patched", "keys_file": "",
-                    "model": "gemini-2.5-flash", "language": "Burmese", "mode": "dialogue",
-                    "extra": [], "unrpyc": "", "repack": False,
-                    "batch_size": 40, "batch_chars": 6000}
+DEFAULT_SETTINGS = {"input": "", "xlsx": "script.xlsx", "output": "patched", "config": CONFIG_NAME,
+                    "language": "Burmese", "mode": "dialogue", "extra": [], "unrpyc": "", "repack": False}
 
 
 def _load_settings():
@@ -1540,22 +1851,31 @@ def _parser_argv(settings):
     return argv
 
 
+def _menu_config(settings):
+    """Loads the Gemini config file used by the menu, creating it with defaults when missing."""
+    path = settings["config"] or CONFIG_NAME
+    if not os.path.exists(path):
+        save_config(path, copy.deepcopy(CONFIG_DEFAULTS))
+        print(f"Created {path} with default settings.")
+    return load_config(path)
+
+
 def _gemini_argv(settings, session):
-    """Key/model options for the translate command; asks for keys when none are known."""
-    if not session.get("keys") and not settings["keys_file"] and not load_keys(argparse.Namespace()):
+    """Options for the translate command; asks for keys when none are known."""
+    _menu_config(settings)
+    if not session.get("keys") and not _any_keys(config_path=settings["config"]):
         answer = _ask("File with your Gemini API keys (one per line), or paste keys separated by commas")
         if not answer:
             raise ValueError("no API keys given")
         if os.path.exists(answer):
-            settings["keys_file"] = answer
+            config = _menu_config(settings)
+            config["keys_file"] = os.path.abspath(answer)
+            save_config(settings["config"], config)
         else:
             session["keys"] = answer        # pasted keys are never written to disk
-    argv = ["--model", settings["model"], "--batch-size", str(settings["batch_size"]),
-            "--batch-chars", str(settings["batch_chars"])]
+    argv = ["--config", settings["config"]]
     if session.get("keys"):
         argv += ["--keys", session["keys"]]
-    elif settings["keys_file"]:
-        argv += ["--keys-file", settings["keys_file"]]
     return argv
 
 
@@ -1618,31 +1938,48 @@ def _menu_progress(settings, session):
 
 def _menu_settings(settings, session):
     while True:
-        keys = "pasted for this session" if session.get("keys") else (settings["keys_file"] or "(not set)")
-        print("\n--- Settings ---")
+        config = _menu_config(settings)
+        if session.get("keys"):
+            keys = "pasted for this session"
+        else:
+            keys = config["keys_file"] or (f"{len(config['keys'])} in the config file" if config["keys"]
+                                           else "(not set)")
+        print(f"\n--- Settings ---   Gemini config file: {os.path.abspath(settings['config'])}")
         print(f"  1) API keys           : {keys}")
-        print(f"  2) Gemini model       : {settings['model']}")
-        print(f"  3) Target language    : {settings['language']}")
-        print(f"  4) Extraction mode    : {settings['mode']}  (dialogue = player-visible text, all = every string)")
-        print(f"  5) Extra patterns     : {settings['extra'] or '(none)'}")
-        print(f"  6) unrpyc path        : {settings['unrpyc'] or '(not set)'}")
-        print(f"  7) Batch size         : {settings['batch_size']} lines per request "
-              f"(max {settings['batch_chars']} source characters)")
+        print(f"  2) Main model         : {config['models'][0]}")
+        print(f"  3) Fallback models    : {', '.join(config['models'][1:]) or '(none)'}")
+        print(f"  4) Batch size         : {config['batch_size']} lines per request "
+              f"(max {config['batch_chars']} source characters)")
+        print(f"  5) Target language    : {settings['language']}")
+        print(f"  6) Extraction mode    : {settings['mode']}  (dialogue = player-visible text, all = every string)")
+        print(f"  7) Extra patterns     : {settings['extra'] or '(none)'}")
+        print(f"  8) unrpyc path        : {settings['unrpyc'] or '(not set)'}")
+        print("  9) Use another Gemini config file")
         print("  0) Back")
+        print("  (retries, cache, temperature, workers ... can be edited in the config file itself)")
         choice = input("Choice: ").strip()
         if choice == "1":
             answer = _ask("Keys file (one key per line), or paste keys separated by commas")
             if answer and os.path.exists(answer):
-                settings["keys_file"], session["keys"] = answer, None
+                config["keys_file"], session["keys"] = os.path.abspath(answer), None
             elif answer:
                 session["keys"] = answer
         elif choice == "2":
-            settings["model"] = _ask("Model", settings["model"])
+            config["models"][0] = _ask("Main model", config["models"][0])
         elif choice == "3":
-            settings["language"] = _ask("Target language", settings["language"])
+            answer = _ask("Fallback models in order, comma separated (- for none)", ", ".join(config["models"][1:]))
+            config["models"] = config["models"][:1] + [m for m in re.split(r"[,\s]+", answer) if m and m != "-"]
         elif choice == "4":
-            settings["mode"] = "all" if settings["mode"] == "dialogue" else "dialogue"
+            print("Bigger batches = fewer requests (good for per-minute/per-day request quotas) but a failed or\n"
+                  "blocked batch costs more to retry; smaller batches follow the context more closely.")
+            config["batch_size"] = _ask_int("Lines per request", config["batch_size"], 1, 500)
+            config["batch_chars"] = _ask_int("Max source characters per request", config["batch_chars"],
+                                             200, 200000)
         elif choice == "5":
+            settings["language"] = _ask("Target language", settings["language"])
+        elif choice == "6":
+            settings["mode"] = "all" if settings["mode"] == "dialogue" else "dialogue"
+        elif choice == "7":
             print("Regexes matched against the text before a string's opening quote; empty line to finish.")
             patterns = []
             while True:
@@ -1655,16 +1992,14 @@ def _menu_settings(settings, session):
                 except re.error as e:
                     print(f"  invalid regex: {e}")
             settings["extra"] = patterns
-        elif choice == "6":
+        elif choice == "8":
             settings["unrpyc"] = _ask("Path to unrpyc.py (empty to clear)")
-        elif choice == "7":
-            print("Bigger batches = fewer requests (good for per-minute/per-day request quotas) but a failed or\n"
-                  "blocked batch costs more to retry; smaller batches follow the context more closely.")
-            settings["batch_size"] = _ask_int("Lines per request", settings["batch_size"], 1, 500)
-            settings["batch_chars"] = _ask_int("Max source characters per request", settings["batch_chars"],
-                                               200, 200000)
+        elif choice == "9":
+            settings["config"] = _ask("Gemini config file", settings["config"])
         else:
             return 0
+        if choice in ("1", "2", "3", "4"):
+            save_config(settings["config"], config)
         _save_settings(settings)
 
 
@@ -1677,7 +2012,7 @@ MENU = (
     ("5", "Translate into another language", lambda s, x: _menu_translate(s, x, ask_language=True)),
     ("6", "Show translation progress", _menu_progress),
     ("7", "Insert the translation back into the game", _menu_insert),
-    ("8", "Settings (API keys, model, language, batch size, extraction mode)", _menu_settings),
+    ("8", "Settings (API keys, models + fallbacks, batch size, language, extraction mode)", _menu_settings),
     ("0", "Exit", None),
 )
 
@@ -1739,6 +2074,10 @@ def main(argv=None):
     p.add_argument("xlsx")
     add_gemini_options(p)
 
+    p = sub.add_parser("config", help=f"write a {CONFIG_NAME} with the default Gemini settings")
+    p.add_argument("path", nargs="?", help=f"where to write it (default: ./{CONFIG_NAME})")
+    p.add_argument("--force", action="store_true", help="overwrite an existing file")
+
     p = sub.add_parser("insert", help="archives/folder + script.xlsx -> patched scripts")
     p.add_argument("input", help="the same input that was given to extract")
     p.add_argument("xlsx")
@@ -1762,6 +2101,8 @@ def main(argv=None):
         parser.error("unrecognized arguments: " + " ".join(rest))
     if args.command == "translate":
         return cmd_translate(args)
+    if args.command == "config":
+        return cmd_config(args)
     return cmd_insert(args)
 
 

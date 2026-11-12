@@ -11,9 +11,9 @@ Requires Python 3.8+ and `pip install openpyxl`.
 
 Run `python vntextpatch.py` with no arguments for an interactive menu: extract,
 build the translation context, test run on a few lines, translate, show
-progress per sheet, insert, and settings (API keys, model, language, extraction
-mode, extra patterns). Paths and settings you enter are remembered in
-`.vntextpatch.json` in the current folder; pasted API keys are kept in memory
+progress per sheet, insert, and settings (API keys, main model and fallbacks,
+batch size, language, extraction mode, extra patterns). Paths and settings you enter are remembered in
+`.vntextpatch.json` and the Gemini ones in `gemini_config.json` in the current folder; pasted API keys are kept in memory
 only. Everything in the menu is also available as the commands below.
 
 ## 1. Extract
@@ -49,8 +49,8 @@ the context only, or nothing). Use `--no-prompt` to skip the question or
 python vntextpatch.py translate script.xlsx --keys-file keys.txt
 ```
 
-* **Keys**: `keys.txt` has one API key per line (or `--keys k1,k2`, or the
-  `GEMINI_API_KEYS` environment variable). Requests rotate round-robin; a key
+* **Keys**: `keys.txt` has one API key per line (or list them in the config
+  file, or `--keys k1,k2`, or the `GEMINI_API_KEYS` environment variable). Requests rotate round-robin; a key
   that returns 429 rests for the delay the API asks for and the next key takes
   over; invalid keys are dropped.
 * **Context ("memory")**: the first run shows Gemini a sample of the script and
@@ -77,9 +77,61 @@ python vntextpatch.py translate script.xlsx --keys-file keys.txt
   menu both are under Settings > Batch size. Larger batches use fewer requests,
   which helps with request-per-day quotas; smaller ones are cheaper to retry.
 
-Useful options: `--model`, `--language`, `--sheets a,b`, `--limit 20` (test
-run), `--workers`, `--batch-size`, `--context-only`, `--rebuild-context`,
-`--retranslate`, `--no-cache`, `--cache-ttl`.
+* **Progress**: a progress bar shows lines done, speed, ETA and the current
+  sheet. The workbook is saved after every batch, so the translated text is in
+  the `.xlsx` as it arrives and an interrupted run loses nothing
+  (`--save-every N` saves every N batches instead).
+* **Errors**: every error Gemini returns is printed with the model, the key
+  (last 4 characters only), the HTTP status and message, and what the script
+  does about it. The full responses are appended to
+  `script.gemini_errors.log`.
+
+### Config file and fallback models
+
+Gemini settings live in a dedicated `gemini_config.json`. Create one with
+`python vntextpatch.py config` (the menu creates it automatically); `translate`
+looks for it next to the workbook, then in the current folder, or takes
+`--config PATH`. Command line options override it.
+
+```json
+{
+  "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"],
+  "keys_file": "keys.txt",
+  "keys": [],
+  "batch_size": 40,
+  "batch_chars": 6000,
+  "workers": 0,
+  "temperature": 0.3,
+  "thinking_budget": null,
+  "cache": true,
+  "cache_ttl": 3600,
+  "max_attempts": 12,
+  "fallback_after_errors": 3,
+  "model_rest_seconds": 60,
+  "request_timeout": 180,
+  "sample_chars": 120000,
+  "error_log": "",
+  "api_base": "https://generativelanguage.googleapis.com/v1beta"
+}
+```
+
+`models` is the main model followed by its fallbacks, in order. The script
+always uses the first model that is available and moves down the list when:
+
+* every key has hit its quota on that model (quotas are tracked per key *and*
+  per model, so the same keys keep working on the fallback),
+* the model answers with server errors or broken JSON
+  `fallback_after_errors` times in a row (it is then rested for
+  `model_rest_seconds`),
+* the model does not exist or is not supported (it is dropped for the run).
+
+It returns to the main model as soon as that is available again. The summary
+at the end shows how many requests each model served. Each key/model pair gets
+its own context cache.
+
+Other options: `--model a,b,c` (main model + fallbacks), `--language`,
+`--sheets a,b`, `--limit 20` (test run), `--workers`, `--context-only`,
+`--rebuild-context`, `--retranslate`, `--no-cache`, `--cache-ttl`.
 
 ## 3. Insert
 
