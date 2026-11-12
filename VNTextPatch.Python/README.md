@@ -7,6 +7,15 @@ translation back, and can fill the workbook with a Gemini translation
 
 Requires Python 3.8+ and `pip install openpyxl`.
 
+## Menu
+
+Run `python vntextpatch.py` with no arguments for an interactive menu: extract,
+build the translation context, test run on a few lines, translate, show
+progress per sheet, insert, and settings (API keys, model, language, extraction
+mode, extra patterns). Paths and settings you enter are remembered in
+`.vntextpatch.json` in the current folder; pasted API keys are kept in memory
+only. Everything in the menu is also available as the commands below.
+
 ## 1. Extract
 
 ```

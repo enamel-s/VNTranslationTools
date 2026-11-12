@@ -10,6 +10,8 @@ but can pull the scripts straight out of the game's .rpa archives:
                                 (several API keys in rotation + context caching)
   insert     archives/folder + script.xlsx -> patched .rpy files / new .rpa
 
+Run it without arguments for an interactive menu.
+
 Spreadsheet columns (identical to VNTextPatch):
   A original character | B original line | C translated character |
   D TL | E TLC | F Edit | G Notes
@@ -1479,7 +1481,224 @@ def ask_what_next(args):
     return main(argv)
 
 
+# ----------------------------------------------------------------------------
+# interactive main menu (shown when the script is started without arguments)
+# ----------------------------------------------------------------------------
+
+SETTINGS_FILE = ".vntextpatch.json"
+DEFAULT_SETTINGS = {"input": "", "xlsx": "script.xlsx", "output": "patched", "keys_file": "",
+                    "model": "gemini-2.5-flash", "language": "Burmese", "mode": "dialogue",
+                    "extra": [], "unrpyc": "", "repack": False}
+
+
+def _load_settings():
+    settings = dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            settings.update({k: v for k, v in json.load(f).items() if k in DEFAULT_SETTINGS})
+    except (OSError, ValueError):
+        pass
+    return settings
+
+
+def _save_settings(settings):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
+def _ask(label, default=""):
+    answer = input(f"{label} [{default}]: " if default else f"{label}: ").strip().strip('"')
+    return answer or default
+
+
+def _ask_yes(label, default=False):
+    answer = input(f"{label} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+    return default if not answer else answer.startswith("y")
+
+
+def _parser_argv(settings):
+    argv = ["--mode", settings["mode"]]
+    for pattern in settings["extra"]:
+        argv += ["--extra", pattern]
+    if settings["unrpyc"]:
+        argv += ["--unrpyc", settings["unrpyc"]]
+    return argv
+
+
+def _gemini_argv(settings, session):
+    """Key/model options for the translate command; asks for keys when none are known."""
+    if not session.get("keys") and not settings["keys_file"] and not load_keys(argparse.Namespace()):
+        answer = _ask("File with your Gemini API keys (one per line), or paste keys separated by commas")
+        if not answer:
+            raise ValueError("no API keys given")
+        if os.path.exists(answer):
+            settings["keys_file"] = answer
+        else:
+            session["keys"] = answer        # pasted keys are never written to disk
+    argv = ["--model", settings["model"]]
+    if session.get("keys"):
+        argv += ["--keys", session["keys"]]
+    elif settings["keys_file"]:
+        argv += ["--keys-file", settings["keys_file"]]
+    return argv
+
+
+def _menu_extract(settings, session):
+    settings["input"] = _ask("Game folder, .rpa archive or folder of .rpy files", settings["input"])
+    settings["xlsx"] = _ask("Workbook to create", settings["xlsx"])
+    if not settings["input"]:
+        raise ValueError("no input given")
+    return main(["extract", settings["input"], settings["xlsx"], "--no-prompt"] + _parser_argv(settings))
+
+
+def _menu_translate(settings, session, extra_argv=(), ask_language=False):
+    settings["xlsx"] = _ask("Workbook to translate", settings["xlsx"])
+    if ask_language:
+        settings["language"] = _ask("Target language", settings["language"])
+    argv = ["translate", settings["xlsx"], "--language", settings["language"]]
+    argv += _gemini_argv(settings, session) + list(extra_argv)
+    return main(argv)
+
+
+def _menu_test_run(settings, session):
+    settings["xlsx"] = _ask("Workbook to translate", settings["xlsx"])
+    sheets = openpyxl.load_workbook(settings["xlsx"], read_only=True).sheetnames
+    print("Sheets: " + ", ".join(sheets))
+    sheet = _ask("Sheet for the test run", sheets[0])
+    count = _ask("How many lines", "20")
+    argv = ["translate", settings["xlsx"], "--language", settings["language"], "--sheets", sheet, "--limit", count]
+    return main(argv + _gemini_argv(settings, session))
+
+
+def _menu_insert(settings, session):
+    settings["input"] = _ask("Original game folder / archive (same as for extract)", settings["input"])
+    settings["xlsx"] = _ask("Translated workbook", settings["xlsx"])
+    settings["output"] = _ask("Folder to receive the patched files", settings["output"])
+    settings["repack"] = _ask_yes("Rebuild the .rpa archives instead of writing loose .rpy files?", settings["repack"])
+    argv = ["insert", settings["input"], settings["xlsx"], settings["output"]] + _parser_argv(settings)
+    return main(argv + (["--repack"] if settings["repack"] else []))
+
+
+def _menu_progress(settings, session):
+    settings["xlsx"] = _ask("Workbook", settings["xlsx"])
+    wb = openpyxl.load_workbook(settings["xlsx"], read_only=True)
+    grand = [0, 0, 0]
+    print(f"\n{'sheet':<32}{'lines':>7}{'TL':>7}{'check':>7}")
+    for ws in wb.worksheets:
+        total = done = flagged = 0
+        for row in ws.iter_rows(min_row=2, max_col=7, values_only=True):
+            row = tuple(row) + (None,) * 7
+            if row[COL_ORIG_LINE - 1]:
+                total += 1
+                done += bool(row[COL_TL - 1])
+                flagged += "CHECK" in str(row[COL_NOTES - 1] or "") or "NOT TRANSLATED" in str(row[COL_NOTES - 1] or "")
+        print(f"{ws.title:<32}{total:>7}{done:>7}{flagged:>7}")
+        grand = [grand[0] + total, grand[1] + done, grand[2] + flagged]
+    percent = 100 * grand[1] // max(grand[0], 1)
+    print(f"{'TOTAL':<32}{grand[0]:>7}{grand[1]:>7}{grand[2]:>7}   ({percent}% translated)")
+    wb.close()
+    return 0
+
+
+def _menu_settings(settings, session):
+    while True:
+        keys = "pasted for this session" if session.get("keys") else (settings["keys_file"] or "(not set)")
+        print("\n--- Settings ---")
+        print(f"  1) API keys           : {keys}")
+        print(f"  2) Gemini model       : {settings['model']}")
+        print(f"  3) Target language    : {settings['language']}")
+        print(f"  4) Extraction mode    : {settings['mode']}  (dialogue = player-visible text, all = every string)")
+        print(f"  5) Extra patterns     : {settings['extra'] or '(none)'}")
+        print(f"  6) unrpyc path        : {settings['unrpyc'] or '(not set)'}")
+        print("  0) Back")
+        choice = input("Choice: ").strip()
+        if choice == "1":
+            answer = _ask("Keys file (one key per line), or paste keys separated by commas")
+            if answer and os.path.exists(answer):
+                settings["keys_file"], session["keys"] = answer, None
+            elif answer:
+                session["keys"] = answer
+        elif choice == "2":
+            settings["model"] = _ask("Model", settings["model"])
+        elif choice == "3":
+            settings["language"] = _ask("Target language", settings["language"])
+        elif choice == "4":
+            settings["mode"] = "all" if settings["mode"] == "dialogue" else "dialogue"
+        elif choice == "5":
+            print("Regexes matched against the text before a string's opening quote; empty line to finish.")
+            patterns = []
+            while True:
+                pattern = input("  pattern: ").strip()
+                if not pattern:
+                    break
+                try:
+                    re.compile(pattern)
+                    patterns.append(pattern)
+                except re.error as e:
+                    print(f"  invalid regex: {e}")
+            settings["extra"] = patterns
+        elif choice == "6":
+            settings["unrpyc"] = _ask("Path to unrpyc.py (empty to clear)")
+        else:
+            return 0
+        _save_settings(settings)
+
+
+MENU = (
+    ("1", "Extract text from the game (.rpa archives / folder) into a workbook", _menu_extract),
+    ("2", "Build / refresh the translation context (names, characters, story notes)",
+     lambda s, x: _menu_translate(s, x, ["--context-only", "--rebuild-context"])),
+    ("3", "Test run: translate a few lines of one sheet", _menu_test_run),
+    ("4", "Translate the workbook with Gemini", _menu_translate),
+    ("5", "Translate into another language", lambda s, x: _menu_translate(s, x, ask_language=True)),
+    ("6", "Show translation progress", _menu_progress),
+    ("7", "Insert the translation back into the game", _menu_insert),
+    ("8", "Settings (API keys, model, language, extraction mode)", _menu_settings),
+    ("0", "Exit", None),
+)
+
+
+def interactive_menu():
+    settings, session = _load_settings(), {}
+    while True:
+        print("\n=== VNTextPatch for Ren'Py ===")
+        print(f"    game: {settings['input'] or '(not set)'}   workbook: {settings['xlsx']}   "
+              f"language: {settings['language']}")
+        for number, title, _action in MENU:
+            print(f"  {number}) {title}")
+        try:
+            choice = input("Choice: ").strip()
+        except EOFError:
+            return 0
+        action = next((a for n, _t, a in MENU if n == choice), False)
+        if action is None:
+            return 0
+        if action is False:
+            print("Please enter one of the numbers above.")
+            continue
+        try:
+            action(settings, session)
+        except EOFError:
+            return 0
+        except KeyboardInterrupt:
+            print("\nInterrupted - progress is saved in the workbook.")
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                print(e.code if isinstance(e.code, str) else f"(finished with exit code {e.code})")
+        except Exception as e:
+            print(f"Error: {e}")
+        _save_settings(settings)
+
+
+
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv or argv == ["menu"]:
+        return interactive_menu()
     parser = argparse.ArgumentParser(
         description="Extract Ren'Py script text from .rpa archives/folders into an .xlsx (VNTextPatch layout), "
                     "translate it with Gemini, and patch it back.")
