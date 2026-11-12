@@ -71,6 +71,12 @@ python vntextpatch.py translate script.xlsx --keys-file keys.txt
   are retried and, if still different, flagged with `CHECK:` in `Notes`.
 * The run is resumable: rows that already have a `TL` value are skipped.
 
+* **Batch size**: `--batch-size N` sets how many lines go into one request
+  (default 40) and `--batch-chars N` caps the source characters per request
+  (default 6000); a batch closes at whichever limit is reached first. In the
+  menu both are under Settings > Batch size. Larger batches use fewer requests,
+  which helps with request-per-day quotas; smaller ones are cheaper to retry.
+
 Useful options: `--model`, `--language`, `--sheets a,b`, `--limit 20` (test
 run), `--workers`, `--batch-size`, `--context-only`, `--rebuild-context`,
 `--retranslate`, `--no-cache`, `--cache-ttl`.

@@ -1294,6 +1294,8 @@ def cmd_translate(args):
     keys = load_keys(args)
     if not keys:
         sys.exit("No Gemini API keys. Use --keys-file FILE (one key per line), --keys k1,k2 or set GEMINI_API_KEYS.")
+    if args.batch_size < 1 or args.batch_chars < 1:
+        sys.exit("--batch-size and --batch-chars must be at least 1")
     pool = KeyPool(keys)
     wb = openpyxl.load_workbook(args.xlsx)
     styles = _column_styles(wb.worksheets[0])
@@ -1366,7 +1368,8 @@ def cmd_translate(args):
     if not total:
         print("Nothing to translate: every line already has a TL entry (use --retranslate to redo).")
         return 0
-    print(f"Translating {total} lines in {len(jobs)} sheets into {args.language} ...")
+    print(f"Translating {total} lines in {len(jobs)} sheets into {args.language} "
+          f"(up to {args.batch_size} lines / {args.batch_chars} characters per request) ...")
 
     book_lock = threading.Lock()
     progress = {"done": 0, "since_save": 0}
@@ -1488,7 +1491,8 @@ def ask_what_next(args):
 SETTINGS_FILE = ".vntextpatch.json"
 DEFAULT_SETTINGS = {"input": "", "xlsx": "script.xlsx", "output": "patched", "keys_file": "",
                     "model": "gemini-2.5-flash", "language": "Burmese", "mode": "dialogue",
-                    "extra": [], "unrpyc": "", "repack": False}
+                    "extra": [], "unrpyc": "", "repack": False,
+                    "batch_size": 40, "batch_chars": 6000}
 
 
 def _load_settings():
@@ -1512,6 +1516,14 @@ def _save_settings(settings):
 def _ask(label, default=""):
     answer = input(f"{label} [{default}]: " if default else f"{label}: ").strip().strip('"')
     return answer or default
+
+
+def _ask_int(label, default, low, high):
+    while True:
+        answer = _ask(label, str(default))
+        if answer.isdigit() and low <= int(answer) <= high:
+            return int(answer)
+        print(f"  enter a number between {low} and {high}")
 
 
 def _ask_yes(label, default=False):
@@ -1538,7 +1550,8 @@ def _gemini_argv(settings, session):
             settings["keys_file"] = answer
         else:
             session["keys"] = answer        # pasted keys are never written to disk
-    argv = ["--model", settings["model"]]
+    argv = ["--model", settings["model"], "--batch-size", str(settings["batch_size"]),
+            "--batch-chars", str(settings["batch_chars"])]
     if session.get("keys"):
         argv += ["--keys", session["keys"]]
     elif settings["keys_file"]:
@@ -1613,6 +1626,8 @@ def _menu_settings(settings, session):
         print(f"  4) Extraction mode    : {settings['mode']}  (dialogue = player-visible text, all = every string)")
         print(f"  5) Extra patterns     : {settings['extra'] or '(none)'}")
         print(f"  6) unrpyc path        : {settings['unrpyc'] or '(not set)'}")
+        print(f"  7) Batch size         : {settings['batch_size']} lines per request "
+              f"(max {settings['batch_chars']} source characters)")
         print("  0) Back")
         choice = input("Choice: ").strip()
         if choice == "1":
@@ -1642,6 +1657,12 @@ def _menu_settings(settings, session):
             settings["extra"] = patterns
         elif choice == "6":
             settings["unrpyc"] = _ask("Path to unrpyc.py (empty to clear)")
+        elif choice == "7":
+            print("Bigger batches = fewer requests (good for per-minute/per-day request quotas) but a failed or\n"
+                  "blocked batch costs more to retry; smaller batches follow the context more closely.")
+            settings["batch_size"] = _ask_int("Lines per request", settings["batch_size"], 1, 500)
+            settings["batch_chars"] = _ask_int("Max source characters per request", settings["batch_chars"],
+                                               200, 200000)
         else:
             return 0
         _save_settings(settings)
@@ -1656,7 +1677,7 @@ MENU = (
     ("5", "Translate into another language", lambda s, x: _menu_translate(s, x, ask_language=True)),
     ("6", "Show translation progress", _menu_progress),
     ("7", "Insert the translation back into the game", _menu_insert),
-    ("8", "Settings (API keys, model, language, extraction mode)", _menu_settings),
+    ("8", "Settings (API keys, model, language, batch size, extraction mode)", _menu_settings),
     ("0", "Exit", None),
 )
 
