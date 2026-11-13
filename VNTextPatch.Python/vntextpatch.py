@@ -1314,8 +1314,8 @@ class GeminiClient:
 SYSTEM_PROMPT = """You are a professional visual novel localizer translating a Ren'Py game from {source} into {target}.
 
 Rules:
-1. Translate meaning and tone, not word by word. Dialogue must sound like natural spoken {target}; narration like natural written prose.
-2. Keep each character's voice consistent with the character sheet in the reference material: gender, age, personality, how they address each other, level of politeness.
+1. Translate meaning and tone, not word by word. Keep the register CASUAL: dialogue must sound like friends actually talking in everyday spoken {target}, and narration (lines with no speaker) is the protagonist's inner monologue - write it the way a person casually thinks to themselves in the first person, never as formal, literary or textbook prose.
+2. Keep each character's voice consistent with the character sheet in the reference material: gender, age, personality, how they address each other. Default to informal speech between characters; only raise the politeness when the story clearly calls for it (talking to a stranger, a teacher, an elder, or a character who is written as stiff/polite - and even then keep it spoken, not bookish).
 3. Always use the glossary translations for names and terms. Never invent a different spelling for a name that is in the glossary.
 4. Copy these verbatim, never translate or reorder their insides: Ren'Py interpolations in square brackets such as [player] or [s_name]; text tags in curly braces such as {{i}}...{{/i}}, {{w=0.5}}, {{nw}}, {{color=#f00}}; escape sequences such as \\n, \\" and %%. Text between an opening and a closing tag IS translated.
 5. Keep leading/trailing whitespace, ellipses and stutters ("W-well...") in an equivalent form. Do not add quotation marks, notes or explanations.
@@ -1324,9 +1324,10 @@ Rules:
 8. Return exactly one result per input line, with the same id.
 {language_rules}"""
 
-BURMESE_RULES = """9. Write standard Burmese in Unicode (never Zawgyi encoding). Use colloquial spoken style (ပြောစကား) for dialogue - e.g. တယ်/မယ်/ဘူး endings - and do not switch to literary style (စာစကား: သည်/မည်/၏) except in poems, letters or formal writing inside the story.
-10. Choose pronouns and sentence-final particles from the speaker's gender and their relationship with the listener (e.g. ကျွန်တော်/ခင်ဗျာ for male speakers, ကျွန်မ/ရှင် for female speakers, or casual ငါ/နင်/မင်း between close friends) and keep that choice consistent for each pair of characters throughout the game.
-11. Transliterate personal names into Burmese script as given in the glossary; keep honorific habits natural for Burmese readers.
+BURMESE_RULES = """9. Write standard Burmese in Unicode (never Zawgyi encoding). Use colloquial spoken style (ပြောစကား) everywhere - တယ်/မယ်/ဘူး/ပြီ endings with natural particles such as ပဲ၊ လေ၊ နော်၊ ကွာ၊ ဟာ၊ ပေါ့၊ လား/လဲ. Never use literary style (စာစကား: သည်/မည်/၏/၌/သော/၍/လျက်) in dialogue or inner monologue; it is only allowed inside poems, letters or other formal writing that exists within the story.
+10. Dialogue between the main characters is casual: use ငါ for "I" and နင်/မင်း (or simply the person's name) for "you", drop pronouns where spoken Burmese would, and use contractions and interjections people really say. Avoid ကျွန်တော်/ကျွန်မ/ခင်ဗျာ/ရှင်/ပါတယ်-heavy polite speech unless the speaker is addressing a stranger, teacher or elder, or the character sheet says that character speaks politely. Keep the chosen pronouns consistent for each pair of characters throughout the game.
+11. Inner monologue / narration: the protagonist thinking to himself, first person ငါ, short relaxed spoken sentences (e.g. "...လို့ ထင်တာပဲ", "...ဖြစ်နေပြီ", "ဘာလို့လဲ မသိဘူး"), with the same casual particles as speech. Do not narrate like a novel or a news report.
+12. Transliterate personal names into Burmese script as given in the glossary; keep honorific habits natural for Burmese readers.
 """
 
 CONTEXT_SCHEMA = {
@@ -1440,11 +1441,15 @@ def build_context(client, wb, target, sample_chars):
         f"- glossary: every character name listed under NAMES, plus recurring proper nouns, places, club/school "
         f"names and catchphrases you find, each with ONE fixed {target} rendering.\n"
         f"- characters: one entry per character: gender, role, personality, how they talk (speech_style: the "
-        f"{target} pronouns, particles and politeness level they should use), and how they address the others.\n"
+        f"casual {target} pronouns and particles they should use; note it explicitly if a character is meant to "
+        f"sound more polite or stiff than the rest), and how they address the others.\n"
         f"- story_notes: setting, premise, relationships and anything a translator must remember "
         f"(running jokes, twists that change how lines should read). Write in English.\n"
         f"- style_guide: concrete {target} style decisions (register, punctuation, how to treat interjections, "
-        f"honorifics, onomatopoeia). Write in English.\n\n"
+        f"honorifics, onomatopoeia). The translation must read CASUAL: everyday spoken {target} for dialogue and "
+        f"a relaxed first-person inner voice for narration, not formal or literary language - so give the casual "
+        f"pronouns, sentence endings and particles to use, and list the few situations where politer speech is "
+        f"right. Write in English.\n\n"
         f"NAMES (speaker name, number of lines):\n"
         + "\n".join(f"- {n} ({speakers.get(n, 0)})" for n in names)
         + "\n\nSCRIPT SAMPLE:\n" + "\n\n".join(samples))

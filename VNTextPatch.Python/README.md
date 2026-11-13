@@ -66,6 +66,11 @@ python vntextpatch.py translate script.xlsx --keys-file keys.txt
   implicit caching still discounts. Cache ids are kept in
   `script.gemini_cache.json` (keys are stored only as hashes); the cache is
   rebuilt when the context changes. `--delete-cache` removes them at the end.
+* **Register**: the prompt asks for casual, everyday spoken Burmese in both
+  dialogue and narration (treated as the protagonist's inner monologue), with
+  polite or literary forms only where the story calls for them. To push the
+  tone further either way, write your instruction in the `"extra_notes"` field
+  of `script.context.json`.
 * Each request also carries the previous 8 lines and their translations.
 * Translations whose `[placeholders]`, `{tags}` or `\n` differ from the source
   are retried and, if still different, flagged with `CHECK:` in `Notes`.
