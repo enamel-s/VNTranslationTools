@@ -11,8 +11,8 @@ Requires Python 3.8+ and `pip install openpyxl`.
 
 Run `python vntextpatch.py` with no arguments for an interactive menu: extract,
 build the translation context, test run on a few lines, translate, show
-progress per sheet, insert, and settings (API keys, main model and fallbacks,
-batch size, language, extraction mode, extra patterns). Paths and settings you enter are remembered in
+progress per sheet, insert, settings (API keys, main model and fallbacks,
+batch size, language, extraction mode, extra patterns) and a translation style editor. Paths and settings you enter are remembered in
 `.vntextpatch.json` and the Gemini ones in `gemini_config.json` in the current folder; pasted API keys are kept in memory
 only. Everything in the menu is also available as the commands below.
 
@@ -66,11 +66,9 @@ python vntextpatch.py translate script.xlsx --keys-file keys.txt
   implicit caching still discounts. Cache ids are kept in
   `script.gemini_cache.json` (keys are stored only as hashes); the cache is
   rebuilt when the context changes. `--delete-cache` removes them at the end.
-* **Register**: the prompt asks for casual, everyday spoken Burmese in both
-  dialogue and narration (treated as the protagonist's inner monologue), with
-  polite or literary forms only where the story calls for them. To push the
-  tone further either way, write your instruction in the `"extra_notes"` field
-  of `script.context.json`.
+* **Style**: how the translation should sound is read from
+  `translation_style.json` (see below). The default is casual, everyday spoken
+  Burmese for both dialogue and inner monologue.
 * Each request also carries the previous 8 lines and their translations.
 * Translations whose `[placeholders]`, `{tags}` or `\n` differ from the source
   are retried and, if still different, flagged with `CHECK:` in `Notes`.
@@ -91,10 +89,35 @@ python vntextpatch.py translate script.xlsx --keys-file keys.txt
   does about it. The full responses are appended to
   `script.gemini_errors.log`.
 
+### Style file: `translation_style.json`
+
+`python vntextpatch.py config` writes it (together with `gemini_config.json`);
+the menu creates it automatically and has an editor for it (main menu 9).
+`translate` looks for it next to the workbook, then in the current folder, or
+takes `--style PATH`.
+
+| Field              | What it controls                                                   |
+| ------------------ | ------------------------------------------------------------------ |
+| `target_language`  | language to translate into (`--language` overrides it)             |
+| `source_language`  | language of the game                                               |
+| `dialogue`         | how characters talk to each other                                  |
+| `inner_monologue`  | how lines without a speaker (the protagonist's thoughts) are written |
+| `politeness`       | when polite speech is allowed                                      |
+| `character_voices` | how strictly to follow the character sheet                         |
+| `language_rules`   | list of rules specific to `target_language` (pronouns, particles, endings); skipped when translating into another language |
+| `extra_rules`      | list of anything else, e.g. `"Natsuki talks rough"`                |
+
+Write plain instructions; `{target}` is replaced by the language name. The
+technical rules (keep `[placeholders]` and `{tags}`, one result per line, ...)
+stay in the script and cannot be broken from this file. After changing the
+style, rebuild the context (`--rebuild-context`, menu 2) and use
+`--retranslate` for lines that were already translated; the context cache is
+rebuilt automatically.
+
 ### Config file and fallback models
 
 Gemini settings live in a dedicated `gemini_config.json`. Create one with
-`python vntextpatch.py config` (the menu creates it automatically); `translate`
+`python vntextpatch.py config [folder]` (the menu creates it automatically); `translate`
 looks for it next to the workbook, then in the current folder, or takes
 `--config PATH`. Command line options override it.
 

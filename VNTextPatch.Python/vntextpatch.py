@@ -1313,22 +1313,117 @@ class GeminiClient:
 
 SYSTEM_PROMPT = """You are a professional visual novel localizer translating a Ren'Py game from {source} into {target}.
 
-Rules:
-1. Translate meaning and tone, not word by word. Keep the register CASUAL: dialogue must sound like friends actually talking in everyday spoken {target}, and narration (lines with no speaker) is the protagonist's inner monologue - write it the way a person casually thinks to themselves in the first person, never as formal, literary or textbook prose.
-2. Keep each character's voice consistent with the character sheet in the reference material: gender, age, personality, how they address each other. Default to informal speech between characters; only raise the politeness when the story clearly calls for it (talking to a stranger, a teacher, an elder, or a character who is written as stiff/polite - and even then keep it spoken, not bookish).
-3. Always use the glossary translations for names and terms. Never invent a different spelling for a name that is in the glossary.
-4. Copy these verbatim, never translate or reorder their insides: Ren'Py interpolations in square brackets such as [player] or [s_name]; text tags in curly braces such as {{i}}...{{/i}}, {{w=0.5}}, {{nw}}, {{color=#f00}}; escape sequences such as \\n, \\" and %%. Text between an opening and a closing tag IS translated.
-5. Keep leading/trailing whitespace, ellipses and stutters ("W-well...") in an equivalent form. Do not add quotation marks, notes or explanations.
-6. Lines of type "name" are character names, "choice" are menu options (keep them short), "string" are interface texts (keep them short), "say" are dialogue or narration.
-7. Lines made of deliberately corrupted or glitched text (random symbols/letters) must be returned unchanged.
-8. Return exactly one result per input line, with the same id.
-{language_rules}"""
+Technical rules (always apply):
+1. Translate meaning and tone, not word by word.
+2. Always use the glossary translations for names and terms. Never invent a different spelling for a name that is in the glossary.
+3. Copy these verbatim, never translate or reorder their insides: Ren'Py interpolations in square brackets such as [player] or [s_name]; text tags in curly braces such as {{i}}...{{/i}}, {{w=0.5}}, {{nw}}, {{color=#f00}}; escape sequences such as \\n, \\" and %%. Text between an opening and a closing tag IS translated.
+4. Keep leading/trailing whitespace, ellipses and stutters ("W-well...") in an equivalent form. Do not add quotation marks, notes or explanations.
+5. Lines of type "name" are character names, "choice" are menu options (keep them short), "string" are interface texts (keep them short), "say" are dialogue (with a speaker) or narration (no speaker).
+6. Lines made of deliberately corrupted or glitched text (random symbols/letters) must be returned unchanged.
+7. Return exactly one result per input line, with the same id.
 
-BURMESE_RULES = """9. Write standard Burmese in Unicode (never Zawgyi encoding). Use colloquial spoken style (ပြောစကား) everywhere - တယ်/မယ်/ဘူး/ပြီ endings with natural particles such as ပဲ၊ လေ၊ နော်၊ ကွာ၊ ဟာ၊ ပေါ့၊ လား/လဲ. Never use literary style (စာစကား: သည်/မည်/၏/၌/သော/၍/လျက်) in dialogue or inner monologue; it is only allowed inside poems, letters or other formal writing that exists within the story.
-10. Dialogue between the main characters is casual: use ငါ for "I" and နင်/မင်း (or simply the person's name) for "you", drop pronouns where spoken Burmese would, and use contractions and interjections people really say. Avoid ကျွန်တော်/ကျွန်မ/ခင်ဗျာ/ရှင်/ပါတယ်-heavy polite speech unless the speaker is addressing a stranger, teacher or elder, or the character sheet says that character speaks politely. Keep the chosen pronouns consistent for each pair of characters throughout the game.
-11. Inner monologue / narration: the protagonist thinking to himself, first person ငါ, short relaxed spoken sentences (e.g. "...လို့ ထင်တာပဲ", "...ဖြစ်နေပြီ", "ဘာလို့လဲ မသိဘူး"), with the same casual particles as speech. Do not narrate like a novel or a news report.
-12. Transliterate personal names into Burmese script as given in the glossary; keep honorific habits natural for Burmese readers.
-"""
+Style rules for this translation:
+{style_rules}"""
+
+# -- translation style file ------------------------------------------------------
+# Everything about HOW the translation should sound lives in translation_style.json
+# so it can be changed without touching the code.
+
+STYLE_NAME = "translation_style.json"
+STYLE_DEFAULTS = {
+    "source_language": "English",
+    "target_language": "Burmese",
+    # how the characters talk to each other
+    "dialogue": "Casual. Dialogue must sound like friends actually talking in everyday spoken {target}, "
+                "with the contractions, interjections and sentence-final particles people really use.",
+    # lines without a speaker
+    "inner_monologue": "Narration is the protagonist's inner monologue. Write it the way a person casually "
+                       "thinks to themselves in the first person - short, relaxed, spoken-style sentences. "
+                       "Never formal, literary or textbook prose.",
+    # when (if ever) to be polite
+    "politeness": "Default to informal speech between characters. Only raise the politeness when the story "
+                  "clearly calls for it: talking to a stranger, a teacher, an elder, or a character who is written "
+                  "as stiff/polite - and even then keep it spoken, not bookish.",
+    "character_voices": "Keep each character's voice consistent with the character sheet in the reference "
+                        "material: gender, age, personality, how they address each other.",
+    # rules that only make sense for the target language above
+    "language_rules": [
+        "Write standard Burmese in Unicode (never Zawgyi encoding).",
+        "Use colloquial spoken style (ပြောစကား) everywhere: တယ်/မယ်/ဘူး/ပြီ endings with natural particles such as "
+        "ပဲ၊ လေ၊ နော်၊ ကွာ၊ ဟာ၊ ပေါ့၊ လား/လဲ.",
+        "Never use literary style (စာစကား: သည်/မည်/၏/၌/သော/၍/လျက်) in dialogue or inner monologue; it is only "
+        "allowed inside poems, letters or other formal writing that exists within the story.",
+        "Pronouns in dialogue between the main characters: ငါ for \"I\" and နင်/မင်း (or simply the person's name) "
+        "for \"you\"; drop pronouns where spoken Burmese would. Avoid ကျွန်တော်/ကျွန်မ/ခင်ဗျာ/ရှင်/ပါတယ်-heavy polite "
+        "speech unless the politeness rule above applies. Keep the chosen pronouns consistent for each pair of "
+        "characters throughout the game.",
+        "Inner monologue uses first person ငါ and relaxed endings (e.g. \"...လို့ ထင်တာပဲ\", \"...ဖြစ်နေပြီ\", "
+        "\"ဘာလို့လဲ မသိဘူး\") with the same casual particles as speech.",
+        "Transliterate personal names into Burmese script as given in the glossary; keep honorific habits "
+        "natural for Burmese readers.",
+    ],
+    # anything else you want the translator to obey, one instruction per entry
+    "extra_rules": [],
+}
+
+
+def find_style(explicit=None, xlsx=None):
+    if explicit:
+        return explicit
+    candidates = []
+    if xlsx:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(xlsx)), STYLE_NAME))
+    candidates.append(os.path.abspath(STYLE_NAME))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def load_style(path):
+    style = copy.deepcopy(STYLE_DEFAULTS)
+    if path:
+        with open(path, encoding="utf-8") as f:
+            try:
+                loaded = json.load(f)
+            except ValueError as e:
+                raise ValueError(f"{path} is not valid JSON: {e}")
+        unknown = sorted(set(loaded) - set(STYLE_DEFAULTS))
+        if unknown:
+            print(f"WARNING: unknown setting(s) in {path}: {', '.join(unknown)}", file=sys.stderr)
+        style.update({k: v for k, v in loaded.items() if k in STYLE_DEFAULTS})
+    for name in ("language_rules", "extra_rules"):
+        if isinstance(style[name], str):
+            style[name] = [style[name]] if style[name].strip() else []
+    return style
+
+
+def save_style(path, style):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({k: style.get(k, v) for k, v in STYLE_DEFAULTS.items()}, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def style_rule_list(style, target):
+    """The style rules as a list of sentences, with {target} filled in."""
+    rules = []
+    for name, label in (("dialogue", "Dialogue"), ("inner_monologue", "Inner monologue / narration"),
+                        ("politeness", "Politeness"), ("character_voices", "Character voices")):
+        if str(style.get(name) or "").strip():
+            rules.append(f"{label}: {style[name].strip()}")
+    # the language-specific rules only apply to the language they were written for
+    if target.strip().lower() == str(style.get("target_language", "")).strip().lower():
+        rules += [r for r in style.get("language_rules") or [] if str(r).strip()]
+    rules += [r for r in style.get("extra_rules") or [] if str(r).strip()]
+    return [str(r).replace("{target}", target) for r in rules]
+
+
+def build_system_prompt(target, source, style=None):
+    style = style or STYLE_DEFAULTS
+    rules = style_rule_list(style, target)
+    numbered = "\n".join(f"{i}. {rule}" for i, rule in enumerate(rules, 8))
+    return SYSTEM_PROMPT.format(source=source, target=target, style_rules=numbered)
+
 
 CONTEXT_SCHEMA = {
     "type": "OBJECT",
@@ -1357,11 +1452,6 @@ TRANSLATION_SCHEMA = {
               "properties": {"id": {"type": "INTEGER"}, "text": {"type": "STRING"}},
               "required": ["id", "text"]},
 }
-
-
-def build_system_prompt(target, source):
-    rules = BURMESE_RULES if re.search(r"burmese|myanmar|မြန်မာ", target, re.I) else ""
-    return SYSTEM_PROMPT.format(source=source, target=target, language_rules=rules)
 
 
 def render_reference(context):
@@ -1414,7 +1504,7 @@ def _markup_signature(text):
     return interpolations, tags, text.count("\\n")
 
 
-def build_context(client, wb, target, sample_chars):
+def build_context(client, wb, target, sample_chars, style=None):
     """Asks Gemini to read a sample of the script and write the translation bible."""
     speakers = {}
     name_lines = []
@@ -1450,7 +1540,10 @@ def build_context(client, wb, target, sample_chars):
         f"a relaxed first-person inner voice for narration, not formal or literary language - so give the casual "
         f"pronouns, sentence endings and particles to use, and list the few situations where politer speech is "
         f"right. Write in English.\n\n"
-        f"NAMES (speaker name, number of lines):\n"
+        f"The translator has been given these style rules; make the speech_style entries and the style_guide "
+        f"agree with them and turn them into concrete word choices:\n"
+        + "\n".join(f"- {r}" for r in style_rule_list(style or STYLE_DEFAULTS, target))
+        + f"\n\nNAMES (speaker name, number of lines):\n"
         + "\n".join(f"- {n} ({speakers.get(n, 0)})" for n in names)
         + "\n\nSCRIPT SAMPLE:\n" + "\n\n".join(samples))
     context = client.generate_json(prompt, CONTEXT_SCHEMA, use_context=False)
@@ -1577,7 +1670,11 @@ def cmd_translate(args):
     context_path = args.context or default_side_path(args.xlsx, ".context.json")
     state_path = default_side_path(args.xlsx, ".gemini_cache.json")
     error_log = config["error_log"] or default_side_path(args.xlsx, ".gemini_errors.log")
-    system_text = build_system_prompt(args.language, args.source_language)
+    style_path = find_style(args.style, args.xlsx)
+    style = load_style(style_path)
+    args.language = args.language or style["target_language"]
+    args.source_language = args.source_language or style["source_language"]
+    system_text = build_system_prompt(args.language, args.source_language, style)
     common = dict(models=config["models"], api_base=config["api_base"], system_text=system_text,
                   state_path=state_path, use_cache=bool(config["cache"]), ttl=config["cache_ttl"],
                   temperature=config["temperature"], thinking_budget=config["thinking_budget"],
@@ -1585,6 +1682,7 @@ def cmd_translate(args):
                   model_rest=config["model_rest_seconds"], timeout=config["request_timeout"],
                   error_log=error_log)
     print(f"Config: {config_path or '(built-in defaults, no ' + CONFIG_NAME + ' found)'}")
+    print(f"Style:  {style_path or '(built-in defaults, no ' + STYLE_NAME + ' found)'}")
     print(f"Using {len(keys)} API key(s). Model: {config['models'][0]}"
           + (f"  fallbacks: {', '.join(config['models'][1:])}" if len(config["models"]) > 1 else ""))
     print(f"Gemini errors are also written to {error_log}")
@@ -1597,7 +1695,7 @@ def cmd_translate(args):
     else:
         print("Building translation context (character names, personalities, story notes) ...")
         context = build_context(GeminiClient(pool, reference_text=None, **common), wb, args.language,
-                                config["sample_chars"])
+                                config["sample_chars"], style)
         with open(context_path, "w", encoding="utf-8") as f:
             json.dump(context, f, ensure_ascii=False, indent=2)
         print(f"Saved translation context to {context_path} - edit it to fix names or add notes "
@@ -1713,15 +1811,20 @@ def cmd_translate(args):
 
 
 def cmd_config(args):
-    path = args.path or CONFIG_NAME
-    if os.path.exists(path) and not args.force:
-        config = load_config(path)
-        print(f"{path} already exists (use --force to reset it to the defaults):")
-    else:
-        config = copy.deepcopy(CONFIG_DEFAULTS)
-        save_config(path, config)
-        print(f"Wrote {path}:")
-    print(json.dumps(config, ensure_ascii=False, indent=2))
+    """Writes the two editable config files: Gemini settings and translation style."""
+    folder = args.path or "."
+    if folder.lower().endswith(".json"):
+        folder = os.path.dirname(folder) or "."
+    os.makedirs(folder, exist_ok=True)
+    for name, defaults, save, purpose in (
+            (CONFIG_NAME, CONFIG_DEFAULTS, save_config, "API keys, models + fallbacks, batch size, retries, cache"),
+            (STYLE_NAME, STYLE_DEFAULTS, save_style, "how the translation should sound")):
+        path = os.path.join(folder, name)
+        if os.path.exists(path) and not args.force:
+            print(f"kept   {path}  ({purpose}; use --force to reset it)")
+        else:
+            save(path, copy.deepcopy(defaults))
+            print(f"wrote  {path}  ({purpose})")
     return 0
 
 
@@ -1747,8 +1850,11 @@ def add_gemini_options(p):
     p.add_argument("--keys-file", help="text file with one Gemini API key per line")
     p.add_argument("--keys", help="comma separated API keys (or set GEMINI_API_KEYS)")
     p.add_argument("--model", help="model, or comma separated list: main model first, then fallbacks")
-    p.add_argument("--language", default="Burmese", help="target language (default: Burmese)")
-    p.add_argument("--source-language", default="English")
+    p.add_argument("--style", metavar="JSON",
+                   help=f"translation style file: tone of dialogue / inner monologue, politeness, language rules "
+                        f"(default: {STYLE_NAME} next to the workbook or in the current folder)")
+    p.add_argument("--language", help="target language (default: the style file's, Burmese)")
+    p.add_argument("--source-language", help="source language (default: the style file's, English)")
     p.add_argument("--context", metavar="JSON", help="translation context file (default: <xlsx>.context.json)")
     p.add_argument("--rebuild-context", action="store_true", help="regenerate the context file")
     p.add_argument("--context-only", action="store_true", help="only build the context / names, don't translate")
@@ -1807,7 +1913,7 @@ def ask_what_next(args):
 # ----------------------------------------------------------------------------
 
 SETTINGS_FILE = ".vntextpatch.json"
-DEFAULT_SETTINGS = {"input": "", "xlsx": "script.xlsx", "output": "patched", "config": CONFIG_NAME,
+DEFAULT_SETTINGS = {"input": "", "xlsx": "script.xlsx", "output": "patched", "config": CONFIG_NAME, "style": STYLE_NAME,
                     "language": "Burmese", "mode": "dialogue", "extra": [], "unrpyc": "", "repack": False}
 
 
@@ -1865,6 +1971,60 @@ def _menu_config(settings):
     return load_config(path)
 
 
+def _menu_style(settings):
+    """Loads the translation style file used by the menu, creating it with defaults when missing."""
+    path = settings["style"] or STYLE_NAME
+    if not os.path.exists(path):
+        save_style(path, copy.deepcopy(STYLE_DEFAULTS))
+        print(f"Created {path} with the default (casual) style.")
+    return load_style(path)
+
+
+def _menu_style_editor(settings, session):
+    fields = (("dialogue", "Dialogue"), ("inner_monologue", "Inner monologue / narration"),
+              ("politeness", "Politeness"), ("character_voices", "Character voices"))
+    while True:
+        style = _menu_style(settings)
+        print(f"\n--- Translation style ---   file: {os.path.abspath(settings['style'])}")
+        for number, (name, label) in enumerate(fields, 1):
+            print(f"  {number}) {label}:\n       {style[name]}")
+        print(f"  5) Language rules for {style['target_language']}: {len(style['language_rules'])} "
+              "(edit them in the file)")
+        print(f"  6) Extra rules: {len(style['extra_rules'])}")
+        for rule in style["extra_rules"]:
+            print(f"       - {rule}")
+        print("  7) Reset everything to the defaults")
+        print("  0) Back")
+        choice = input("Choice: ").strip()
+        if choice in ("1", "2", "3", "4"):
+            name, label = fields[int(choice) - 1]
+            answer = input(f"New instruction for {label} (empty = keep): ").strip()
+            if answer:
+                style[name] = answer
+        elif choice == "6":
+            print("One instruction per line, e.g. \"Natsuki talks rough and uses ဟ a lot\". Empty line to finish;"
+                  "\ntype - on the first line to remove all extra rules.")
+            rules = []
+            while True:
+                rule = input("  rule: ").strip()
+                if not rule:
+                    break
+                rules.append(rule)
+            if rules == ["-"]:
+                style["extra_rules"] = []
+            elif rules:
+                style["extra_rules"] += rules
+        elif choice == "7":
+            if _ask_yes("Really reset the style file?"):
+                style = copy.deepcopy(STYLE_DEFAULTS)
+        elif choice != "5":
+            return 0
+        save_style(settings["style"], style)
+        if choice in ("1", "2", "3", "4", "6", "7"):
+            print("Saved. Already translated lines keep their old style: rebuild the context (main menu 2) and "
+                  "re-translate to apply it to them.")
+
+
 def _gemini_argv(settings, session):
     """Options for the translate command; asks for keys when none are known."""
     _menu_config(settings)
@@ -1878,7 +2038,8 @@ def _gemini_argv(settings, session):
             save_config(settings["config"], config)
         else:
             session["keys"] = answer        # pasted keys are never written to disk
-    argv = ["--config", settings["config"]]
+    _menu_style(settings)
+    argv = ["--config", settings["config"], "--style", settings["style"]]
     if session.get("keys"):
         argv += ["--keys", session["keys"]]
     return argv
@@ -2018,6 +2179,7 @@ MENU = (
     ("6", "Show translation progress", _menu_progress),
     ("7", "Insert the translation back into the game", _menu_insert),
     ("8", "Settings (API keys, models + fallbacks, batch size, language, extraction mode)", _menu_settings),
+    ("9", "Translation style (tone of dialogue / inner monologue, politeness, extra rules)", _menu_style_editor),
     ("0", "Exit", None),
 )
 
@@ -2079,8 +2241,8 @@ def main(argv=None):
     p.add_argument("xlsx")
     add_gemini_options(p)
 
-    p = sub.add_parser("config", help=f"write a {CONFIG_NAME} with the default Gemini settings")
-    p.add_argument("path", nargs="?", help=f"where to write it (default: ./{CONFIG_NAME})")
+    p = sub.add_parser("config", help=f"write {CONFIG_NAME} and {STYLE_NAME} with the default settings")
+    p.add_argument("path", nargs="?", help="folder to write them to (default: current folder)")
     p.add_argument("--force", action="store_true", help="overwrite an existing file")
 
     p = sub.add_parser("insert", help="archives/folder + script.xlsx -> patched scripts")
