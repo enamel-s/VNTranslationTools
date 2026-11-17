@@ -1104,6 +1104,7 @@ class GeminiClient:
         self.network_failures = 0
         self.lock = threading.Lock()
         self.no_cache = set()           # (key, model) pairs that can't create caches
+        self.no_cache_models = set()    # models that don't offer explicit caching at all
         self.dead_models = {}           # model -> why it was dropped
         self.model_errors = {m: 0 for m in self.models}
         self.last_model = None
@@ -1168,7 +1169,7 @@ class GeminiClient:
             return None
         sid = self._state_id(key, model)
         with self.lock:
-            if (key, model) in self.no_cache:
+            if (key, model) in self.no_cache or model in self.no_cache_models:
                 return None
             entry = self.state.get(sid)
             if entry and entry.get("digest") == self.digest and entry.get("expires", 0) > time.time() + 120:
@@ -1186,6 +1187,16 @@ class GeminiClient:
         except GeminiError as e:
             if e.status in (0, 429, 500, 502, 503, 504):
                 return None        # temporary: send the context inline this time
+            if "not supported for" in (e.message or "").lower():
+                # the model itself has no explicit caching: no point asking again with the other keys
+                with self.lock:
+                    first = model not in self.no_cache_models
+                    self.no_cache_models.add(model)
+                if first:
+                    self.report(f"{model} has no explicit context caching. Not a problem: the names, character "
+                                "sheet and style rules are sent with every request instead, so the translation "
+                                "is the same. This is the only time this is shown for this model.", key, model, e)
+                return None
             with self.lock:
                 self.no_cache.add((key, model))
             self.report("context cache not available for this key/model; sending the context inline instead "
