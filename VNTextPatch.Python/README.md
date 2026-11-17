@@ -75,8 +75,10 @@ python vntextpatch.py translate script.xlsx --keys-file keys.txt
 * The run is resumable: rows that already have a `TL` value are skipped.
 
 * **Batch size**: `--batch-size N` sets how many lines go into one request
-  (default 40) and `--batch-chars N` caps the source characters per request
-  (default 6000); a batch closes at whichever limit is reached first. In the
+  (default 250) and `--batch-chars N` caps the source characters per request
+  (default 20000; rule of thumb `batch_size` x 80); a batch closes at whichever
+  limit is reached first. The defaults assume a model with a ~65k-token output
+  limit; lower both for models with a smaller one. In the
   menu both are under Settings > Batch size. Larger batches use fewer requests,
   which helps with request-per-day quotas; smaller ones are cheaper to retry.
 
@@ -123,11 +125,11 @@ looks for it next to the workbook, then in the current folder, or takes
 
 ```json
 {
-  "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"],
+  "models": ["gemini-4-hydrogen", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
   "keys_file": "keys.txt",
   "keys": [],
-  "batch_size": 40,
-  "batch_chars": 6000,
+  "batch_size": 250,
+  "batch_chars": 20000,
   "workers": 0,
   "temperature": 0.3,
   "thinking_budget": null,
@@ -136,7 +138,7 @@ looks for it next to the workbook, then in the current folder, or takes
   "max_attempts": 12,
   "fallback_after_errors": 3,
   "model_rest_seconds": 60,
-  "request_timeout": 180,
+  "request_timeout": 600,
   "sample_chars": 120000,
   "error_log": "",
   "api_base": "https://generativelanguage.googleapis.com/v1beta"

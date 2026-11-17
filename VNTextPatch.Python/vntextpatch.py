@@ -882,11 +882,11 @@ class Progress:
 CONFIG_NAME = "gemini_config.json"
 CONFIG_DEFAULTS = {
     # tried in this order: the first is the main model, the rest are fallbacks
-    "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"],
+    "models": ["gemini-4-hydrogen", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
     "keys_file": "",            # text file, one API key per line (relative to this config file)
     "keys": [],                 # ...or keys listed right here
-    "batch_size": 40,           # lines per request
-    "batch_chars": 6000,        # max source characters per request
+    "batch_size": 250,          # lines per request
+    "batch_chars": 20000,       # max source characters per request (rule of thumb: batch_size x 80)
     "workers": 0,               # sheets translated in parallel (0 = number of keys, max 8)
     "temperature": 0.3,
     "thinking_budget": None,    # thinkingBudget for models that support it (null = model default)
@@ -895,7 +895,7 @@ CONFIG_DEFAULTS = {
     "max_attempts": 12,         # requests tried for one batch before giving up
     "fallback_after_errors": 3, # consecutive server/format errors before a model is rested
     "model_rest_seconds": 60,   # how long a failing model is rested (fallbacks take over meanwhile)
-    "request_timeout": 180,
+    "request_timeout": 600,
     "sample_chars": 120000,     # how much script Gemini reads to build the translation context
     "error_log": "",            # default: <workbook>.gemini_errors.log
     "api_base": "https://generativelanguage.googleapis.com/v1beta",
@@ -1054,7 +1054,7 @@ class GeminiClient:
 
     def __init__(self, pool, models, api_base, system_text, reference_text, state_path,
                  use_cache=True, ttl=3600, temperature=0.3, thinking_budget=None, max_attempts=12,
-                 fallback_after=3, model_rest=60, timeout=180, error_log=None):
+                 fallback_after=3, model_rest=60, timeout=600, error_log=None):
         self.pool = pool
         self.models = list(models)
         self.api_base = api_base.rstrip("/")
