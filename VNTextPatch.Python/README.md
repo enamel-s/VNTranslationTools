@@ -116,6 +116,15 @@ style, rebuild the context (`--rebuild-context`, menu 2) and use
 `--retranslate` for lines that were already translated; the context cache is
 rebuilt automatically.
 
+### "network error ... getaddrinfo failed"
+
+This means the computer could not reach the Gemini server at all (no internet,
+DNS problem, typo in `api_base`, or Google's AI services blocked on the
+network). It has nothing to do with keys, models or batch size. `translate`
+checks the connection before it starts and explains what to try; during a run
+it keeps retrying for `network_give_up_seconds` and then stops. If you need a
+proxy or VPN, set the `HTTPS_PROXY` environment variable before starting.
+
 ### Config file and fallback models
 
 Gemini settings live in a dedicated `gemini_config.json`. Create one with
@@ -139,6 +148,7 @@ looks for it next to the workbook, then in the current folder, or takes
   "fallback_after_errors": 3,
   "model_rest_seconds": 60,
   "request_timeout": 600,
+  "network_give_up_seconds": 300,
   "sample_chars": 120000,
   "error_log": "",
   "api_base": "https://generativelanguage.googleapis.com/v1beta"

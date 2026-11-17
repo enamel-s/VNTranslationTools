@@ -896,6 +896,7 @@ CONFIG_DEFAULTS = {
     "fallback_after_errors": 3, # consecutive server/format errors before a model is rested
     "model_rest_seconds": 60,   # how long a failing model is rested (fallbacks take over meanwhile)
     "request_timeout": 600,
+    "network_give_up_seconds": 300,  # stop after this long without being able to reach the API at all
     "sample_chars": 120000,     # how much script Gemini reads to build the translation context
     "error_log": "",            # default: <workbook>.gemini_errors.log
     "api_base": "https://generativelanguage.googleapis.com/v1beta",
@@ -965,6 +966,34 @@ def load_keys(args, config=None, config_path=None):
             seen.add(k)
             out.append(k)
     return out
+
+
+NETWORK_HELP = """The Gemini API server could not be reached at all - this is a connection problem on this computer,
+not a problem with your keys, the model or the batch size. Check, in this order:
+  1. Is the internet working? Open https://aistudio.google.com in a browser on this computer.
+  2. "api_base" in the config file - it must be exactly
+     https://generativelanguage.googleapis.com/v1beta   (a typo gives this same error)
+  3. DNS: "getaddrinfo failed" means the name could not be looked up. Try `nslookup {host}`;
+     if it fails, change the DNS server (e.g. 8.8.8.8 or 1.1.1.1) or restart the router.
+  4. VPN / firewall / antivirus: if Google's AI services are blocked on your network or in your country,
+     connect a VPN first. If you must go through a proxy, set the HTTPS_PROXY environment variable
+     before starting the script (e.g.  set HTTPS_PROXY=http://127.0.0.1:7890 ).
+Nothing was lost: finished batches are already in the workbook, run the same command again to continue."""
+
+
+def check_connection(api_base):
+    """Fails fast with a readable explanation when the API host can't even be looked up."""
+    import socket
+    from urllib.parse import urlparse
+    parsed = urlparse(api_base)
+    if not parsed.scheme or not parsed.hostname:
+        raise RuntimeError(f"\"api_base\" is not a valid URL: {api_base!r}")
+    if urllib.request.getproxies().get(parsed.scheme):
+        return      # requests go through a proxy, which does the name lookup
+    try:
+        socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except OSError as e:
+        raise RuntimeError(f"cannot reach {parsed.hostname}: {e}\n" + NETWORK_HELP.format(host=parsed.hostname))
 
 
 class KeyPool:
@@ -1054,7 +1083,7 @@ class GeminiClient:
 
     def __init__(self, pool, models, api_base, system_text, reference_text, state_path,
                  use_cache=True, ttl=3600, temperature=0.3, thinking_budget=None, max_attempts=12,
-                 fallback_after=3, model_rest=60, timeout=600, error_log=None):
+                 fallback_after=3, model_rest=60, timeout=600, error_log=None, network_give_up=300):
         self.pool = pool
         self.models = list(models)
         self.api_base = api_base.rstrip("/")
@@ -1070,6 +1099,9 @@ class GeminiClient:
         self.model_rest = model_rest
         self.timeout = timeout
         self.error_log = error_log
+        self.network_give_up = network_give_up
+        self.network_down_since = None  # time of the first failure in the current run of network errors
+        self.network_failures = 0
         self.lock = threading.Lock()
         self.no_cache = set()           # (key, model) pairs that can't create caches
         self.dead_models = {}           # model -> why it was dropped
@@ -1223,6 +1255,31 @@ class GeminiClient:
             self.pool.cooldown(key, model, min(3 * 2 ** count, 60))
         self.report(what, key, model, err, detail)
 
+    def _network_failed(self, key, model, err):
+        """
+        The API could not be reached at all. That says nothing about the key or the
+        model, so nobody is rested or dropped: wait, try again, and give up with an
+        explanation when the connection stays down.
+        """
+        with self.lock:
+            now = time.time()
+            if self.network_down_since is None:
+                self.network_down_since = now
+                self.network_failures = 0
+            self.network_failures += 1
+            count, down_for = self.network_failures, now - self.network_down_since
+        host = self.api_base.split("//")[-1].split("/")[0]
+        if down_for >= self.network_give_up:
+            self.report("giving up", key, model, err)
+            raise RuntimeError(f"no connection to {host} for {down_for:.0f}s ({err.message})\n"
+                               + NETWORK_HELP.format(host=host))
+        wait = min(5 * count, 30)
+        if count == 1 or count % 5 == 0:
+            self.report(f"cannot reach {host} - this is a network problem, not a key/model problem. Retrying "
+                        f"every few seconds for up to {self.network_give_up}s (failed attempts so far: {count})",
+                        key, model, err)
+        time.sleep(wait)
+
     # -- generation ---------------------------------------------------------
     def generate_json(self, user_text, schema, use_context=True):
         last_error = None
@@ -1257,12 +1314,18 @@ class GeminiClient:
             except GeminiError as e:
                 last_error = e
                 text = (e.message or "").lower()
+                if e.status == 0:
+                    attempts -= 1          # never reached Gemini: doesn't use up the batch's attempts
+                    self._network_failed(key, model, e)
+                    continue
+                with self.lock:
+                    self.network_down_since = None
                 if e.status == 429:
                     delay = _retry_delay(e)
                     self.pool.cooldown(key, model, delay)
                     self.report(f"quota reached: resting this key on {model} for {delay:.0f}s, "
                                 "switching to the next key/model", key, model, e)
-                elif e.status in (0, 500, 502, 503, 504):
+                elif e.status in (500, 502, 503, 504):
                     self._model_failed(model, key, "retrying with another key", e)
                 elif cache and e.status in (400, 403, 404) and "cache" in text:
                     self._drop_cache(key, model)      # expired or deleted: recreate on the next try
@@ -1282,6 +1345,7 @@ class GeminiClient:
 
             usage = resp.get("usageMetadata") or {}
             with self.lock:
+                self.network_down_since = None
                 self.usage["requests"] += 1
                 self.usage["prompt"] += usage.get("promptTokenCount", 0)
                 self.usage["cached"] += usage.get("cachedContentTokenCount", 0)
@@ -1680,7 +1744,8 @@ def cmd_translate(args):
                   temperature=config["temperature"], thinking_budget=config["thinking_budget"],
                   max_attempts=config["max_attempts"], fallback_after=config["fallback_after_errors"],
                   model_rest=config["model_rest_seconds"], timeout=config["request_timeout"],
-                  error_log=error_log)
+                  error_log=error_log, network_give_up=config["network_give_up_seconds"])
+    check_connection(config["api_base"])
     print(f"Config: {config_path or '(built-in defaults, no ' + CONFIG_NAME + ' found)'}")
     print(f"Style:  {style_path or '(built-in defaults, no ' + STYLE_NAME + ' found)'}")
     print(f"Using {len(keys)} API key(s). Model: {config['models'][0]}"
@@ -1776,6 +1841,7 @@ def cmd_translate(args):
         return ws.title
 
     failed = []
+    network_error = None
     workers = max(1, min(config["workers"] or len(keys), len(jobs), 8))
     with Progress(total) as bar:
         try:
@@ -1785,8 +1851,11 @@ def cmd_translate(args):
                     try:
                         future.result()
                     except Exception as e:   # keep the other sheets going, report at the end
-                        failed.append(f"{futures[future]}: {e}")
-                        log(f"  ! sheet {futures[future]} stopped: {e}")
+                        first_line = str(e).split("\n")[0]
+                        failed.append(f"{futures[future]}: {first_line}")
+                        log(f"  ! sheet {futures[future]} stopped: {first_line}")
+                        if "no connection to" in first_line:
+                            network_error = str(e)
         finally:
             with book_lock:
                 save_workbook(wb, args.xlsx)
@@ -1802,6 +1871,8 @@ def cmd_translate(args):
         print(f"{client.error_count} Gemini error(s) occurred - details in {error_log}")
     if args.delete_cache:
         client.delete_caches()
+    if network_error:
+        print("\n" + network_error.split("\n", 1)[1], file=sys.stderr)
     if failed:
         print("Some sheets stopped early (run the command again to resume):", file=sys.stderr)
         for f in failed:
